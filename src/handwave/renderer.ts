@@ -82,11 +82,8 @@ export function renderArticleHtml(
     }
     .theorem-view,
     .definition-view {
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--surface);
       margin: 1.25em 0;
-      padding: 16px;
+      padding: 0;
     }
     .theorem-statement,
     .definition-statement {
@@ -95,6 +92,49 @@ export function renderArticleHtml(
     .theorem-line,
     .definition-line {
       margin: 0;
+    }
+    .declaration-label {
+      display: inline-block;
+      position: relative;
+    }
+    .source-popover {
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+      border: 1px solid var(--vscode-editorHoverWidget-border, var(--border));
+      border-radius: 6px;
+      box-shadow: 0 6px 18px color-mix(in srgb, black 18%, transparent);
+      display: none;
+      left: 0;
+      min-width: max-content;
+      padding: 6px 8px;
+      position: absolute;
+      top: calc(100% + 2px);
+      z-index: 10;
+    }
+    .source-popover::before {
+      content: "";
+      height: 8px;
+      left: 0;
+      position: absolute;
+      right: 0;
+      top: -8px;
+    }
+    .source-popover a {
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+      white-space: nowrap;
+    }
+    .source-popover-row + .source-popover-row {
+      border-top: 1px solid var(--border);
+      margin-top: 6px;
+      padding-top: 6px;
+    }
+    .source-popover-separator {
+      color: var(--muted);
+      margin: 0 7px;
+    }
+    .declaration-label:hover .source-popover,
+    .declaration-label:focus-within .source-popover {
+      display: block;
     }
     .theorem-line strong,
     .definition-line strong,
@@ -105,9 +145,9 @@ export function renderArticleHtml(
       align-items: center;
       display: inline-flex;
       gap: 2px;
-      margin-bottom: 0.45em;
     }
-    .mode-control {
+    .mode-control,
+    .collapse-control {
       background: transparent;
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -121,7 +161,19 @@ export function renderArticleHtml(
       padding: 2px 6px;
       text-transform: lowercase;
     }
-    .mode-control:hover {
+    .collapse-control {
+      align-items: center;
+      border-color: transparent;
+      display: inline-flex;
+      font-size: 1.05em;
+      height: 1.25em;
+      justify-content: center;
+      padding: 0;
+      text-transform: none;
+      width: 1.25em;
+    }
+    .mode-control:hover,
+    .collapse-control:hover {
       background: var(--vscode-button-secondaryHoverBackground, var(--surface));
     }
     .mode-control[aria-pressed="true"] {
@@ -133,20 +185,41 @@ export function renderArticleHtml(
       margin: 0;
       white-space: pre-wrap;
     }
-    [data-mode="prose"] .lean-content,
+    [data-mode="text"] .lean-content,
     [data-mode="lean"] .prose-content,
     [data-mode="collapsed"] .proof-content {
       display: none;
     }
     .proof-section {
-      border-top: 1px solid var(--border);
-      padding-top: 0.9em;
+      margin-top: 0.9em;
+      position: relative;
     }
     .proof-line {
-      margin-bottom: 0.5em;
+      display: block;
+      margin-bottom: 0;
+      margin-left: 0;
+    }
+    .proof-line .collapse-control {
+      left: -1.55em;
+      position: absolute;
+      top: -0.05em;
     }
     .proof-body {
-      margin-left: 1.25em;
+      display: inline;
+    }
+    .proof-content {
+      display: inline;
+    }
+    .proof-body .prose-content {
+      display: inline;
+    }
+    .proof-body .lean-content {
+      margin-top: 0.5em;
+    }
+    .qed {
+      float: right;
+      line-height: 1.6;
+      margin-left: 1em;
     }
     .unresolved {
       border-color: color-mix(in srgb, var(--danger) 45%, transparent);
@@ -194,6 +267,38 @@ ${body}
 
     const nextMode = button.dataset.setMode;
     section.dataset.mode = nextMode;
+    for (const control of section.querySelectorAll("[data-set-mode]")) {
+      control.setAttribute("aria-pressed", String(control.dataset.setMode === nextMode));
+    }
+    for (const control of section.querySelectorAll("[data-toggle-collapsed]")) {
+      control.setAttribute("aria-expanded", String(nextMode !== "collapsed"));
+      control.textContent = nextMode === "collapsed" ? "▸" : "▾";
+      control.setAttribute("aria-label", nextMode === "collapsed" ? "Expand proof" : "Collapse proof");
+    }
+    if (nextMode !== "collapsed") {
+      section.dataset.lastMode = nextMode;
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-toggle-collapsed]");
+    if (!button) {
+      return;
+    }
+
+    const section = button.closest("[data-mode]");
+    if (!section) {
+      return;
+    }
+
+    const nextMode = section.dataset.mode === "collapsed" ? (section.dataset.lastMode || "text") : "collapsed";
+    if (section.dataset.mode !== "collapsed") {
+      section.dataset.lastMode = section.dataset.mode || "text";
+    }
+    section.dataset.mode = nextMode;
+    button.setAttribute("aria-expanded", String(nextMode !== "collapsed"));
+    button.textContent = nextMode === "collapsed" ? "▸" : "▾";
+    button.setAttribute("aria-label", nextMode === "collapsed" ? "Expand proof" : "Collapse proof");
     for (const control of section.querySelectorAll("[data-set-mode]")) {
       control.setAttribute("aria-pressed", String(control.dataset.setMode === nextMode));
     }
@@ -298,33 +403,23 @@ function renderTheoremView(
   const proseStatement =
     declaration.doc?.fields.statement ??
     `See the Lean statement for ${declaration.name}.`;
-  const proseProof = declaration.doc?.fields["proof.sketch"] ?? "No prose proof sketch has been written yet.";
+  const proseProof = declaration.doc?.fields.proof ?? "No prose proof has been written yet.";
   const leanProof = declaration.leanProof ?? declaration.statement;
   const label = declarationLabel("Theorem", declaration);
 
   return compactHtml(`
     <section class="theorem-view" data-target="${escapeHtml(target)}">
-      <div class="theorem-statement" data-section="statement" data-mode="prose">
-        <div class="view-switch" role="group" aria-label="Theorem view">
-          <button class="mode-control" type="button" data-set-mode="prose" aria-pressed="true">prose</button>
-          <button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button>
-        </div>
-        <p class="theorem-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
+      <div class="theorem-statement" data-section="statement" data-mode="text">
+        <p class="theorem-line">${renderDeclarationLabel(label, target, commandHref, "Theorem view")} <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
         <pre class="lean-content"><code>${escapeHtml(declaration.leanStatement)}</code></pre>
       </div>
-      <div class="proof-section" data-section="proof" data-mode="prose">
-        <div class="view-switch" role="group" aria-label="Proof view">
-          <button class="mode-control" type="button" data-set-mode="prose" aria-pressed="true">prose</button>
-          <button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button>
-          <button class="mode-control" type="button" data-set-mode="collapsed" aria-pressed="false">collapsed</button>
-        </div>
-        <p class="proof-line"><strong>Proof.</strong></p>
-        <div class="proof-content">
+      <div class="proof-section" data-section="proof" data-mode="text">
+        <div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾</button>${renderProofLabel()} <div class="proof-content">
           <div class="proof-body">
-            <div class="prose-content">${renderInlineMarkdown(proseProof, commandHref).replace(/\r?\n/g, "<br>")}</div>
+            <span class="prose-content">${renderInlineMarkdown(proseProof, commandHref).replace(/\r?\n/g, "<br>")}<span class="qed" aria-label="QED">□</span></span>
             <pre class="lean-content"><code>${escapeHtml(leanProof)}</code></pre>
           </div>
-        </div>
+        </div></div>
       </div>
     </section>
   `);
@@ -342,12 +437,8 @@ function renderDefinitionView(
 
   return compactHtml(`
     <section class="definition-view" data-target="${escapeHtml(target)}">
-      <div class="definition-statement" data-section="statement" data-mode="prose">
-        <div class="view-switch" role="group" aria-label="Definition view">
-          <button class="mode-control" type="button" data-set-mode="prose" aria-pressed="true">prose</button>
-          <button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button>
-        </div>
-        <p class="definition-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
+      <div class="definition-statement" data-section="statement" data-mode="text">
+        <p class="definition-line">${renderDeclarationLabel(label, target, commandHref, "Definition view")} <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
         <pre class="lean-content"><code>${escapeHtml(declaration.statement)}</code></pre>
       </div>
     </section>
@@ -365,6 +456,23 @@ function declarationLabel(baseLabel: string, declaration: LeanDeclaration): stri
   }
 
   return `${escapeHtml(baseLabel)} (${escapeHtml(displayName)}).`;
+}
+
+function renderDeclarationLabel(
+  label: string,
+  target: string,
+  commandHref: (target: string) => string,
+  controlsLabel: string
+): string {
+  return `<span class="declaration-label"><strong>${label}</strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${escapeHtml(commandHref(target))}" title="Open ${escapeHtml(target)}">${escapeHtml(target)}</a></span></span></span>`;
+}
+
+function renderProofLabel(): string {
+  return `<span class="declaration-label"><strong>Proof.</strong><span class="source-popover"><span class="source-popover-row">${renderModeControls("Proof view")}</span></span></span>`;
+}
+
+function renderModeControls(ariaLabel: string): string {
+  return `<span class="view-switch" role="group" aria-label="${escapeHtml(ariaLabel)}"><button class="mode-control" type="button" data-set-mode="text" aria-pressed="true">text</button><button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button></span>`;
 }
 
 function slugForHeading(title: string): string {

@@ -11,7 +11,7 @@ name:
   Addition associativity
 statement:
   Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$.
-proof.sketch:
+proof:
   Use the standard associativity theorem.
 -/
 theorem my_add_assoc (a b c : Nat) :
@@ -34,7 +34,7 @@ The central observation is that
 [parentheses do not matter](lean:my_add_assoc).
 
 @include{lean:my_add_assoc}
-@include{lean:my_add_assoc.proof.sketch}
+@include{lean:my_add_assoc.proof}
 
 [broken](lean:Missing.add_assoc)
 `;
@@ -43,7 +43,7 @@ const unnamedLeanText = `/--
 %%handwave
 statement:
   Multiplication by one leaves a natural number unchanged.
-proof.sketch:
+proof:
   Use the identity law for multiplication.
 -/
 theorem mul_one_right (n : Nat) : n * 1 = n := by
@@ -91,7 +91,7 @@ test("parses article headings, links, and includes", () => {
   assert.equal(article.links[0].target, "lean:my_add_assoc");
   assert.equal(article.includes.length, 2);
   assert.equal(article.includes[0].target, "lean:my_add_assoc");
-  assert.equal(article.includes[1].target, "lean:my_add_assoc.proof.sketch");
+  assert.equal(article.includes[1].target, "lean:my_add_assoc.proof");
 });
 
 test("parses targets and selectors", () => {
@@ -119,7 +119,7 @@ test("resolves Lean selectors, article targets, and local targets", () => {
 
   assert.equal(index.resolve("lean:my_add_assoc")?.title, "my_add_assoc");
   assert.equal(
-    index.resolve("lean:my_add_assoc.proof.sketch")?.preview,
+    index.resolve("lean:my_add_assoc.proof")?.preview,
     "Use the standard associativity theorem."
   );
   assert.equal(
@@ -153,12 +153,15 @@ test("renders Lean statement includes as theorem views", () => {
   const html = renderArticleHtml(articleText, "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
 
   assert.match(html, /<strong>Theorem \(Addition associativity\)\.<\/strong>/);
-  assert.match(html, /<p class="proof-line"><strong>Proof\.<\/strong><\/p>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:my_add_assoc" title="Open lean:my_add_assoc">lean:my_add_assoc<\/a>/);
+  assert.match(html, /<div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾<\/button><span class="declaration-label"><strong>Proof\.<\/strong>.*<div class="proof-content">/);
+  assert.match(html, /Use the standard associativity theorem\.<span class="qed" aria-label="QED">□<\/span>/);
   assert.match(html, /aria-label="Theorem view"/);
   assert.match(html, /aria-label="Proof view"/);
-  assert.match(html, /data-set-mode="prose"/);
+  assert.match(html, /data-set-mode="text"/);
   assert.match(html, /data-set-mode="lean"/);
-  assert.match(html, /data-set-mode="collapsed"/);
+  assert.doesNotMatch(html, /data-set-mode="prose"/);
+  assert.doesNotMatch(html, /data-set-mode="collapsed"/);
   assert.match(html, /Addition of natural numbers is associative: \$\(a \+ b\) \+ c = a \+ \(b \+ c\)\$\./);
   assert.match(html, /Use the standard associativity theorem\./);
   assert.match(html, /exact Nat\.add_assoc a b c/);
@@ -182,10 +185,11 @@ test("renders definition includes as definition views", () => {
 
   assert.match(html, /class="definition-view"/);
   assert.match(html, /<strong>Definition \(Double\)\.<\/strong>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Definition view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:double" title="Open lean:double">lean:double<\/a>/);
   assert.match(html, /aria-label="Definition view"/);
   assert.match(html, /Doubling a natural number means adding it to itself: \$\\operatorname\{double\}\(n\) = n \+ n\$\./);
   assert.match(html, /def double \(n : Nat\) : Nat := n \+ n/);
-  assert.doesNotMatch(html, /<p class="proof-line"><strong>Proof\.<\/strong><\/p>/);
+  assert.doesNotMatch(html, /<div class="proof-line">/);
 });
 
 test("enables MathJax for LaTeX formulas in rendered articles", () => {

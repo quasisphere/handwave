@@ -4,7 +4,7 @@ name:
   Addition associativity
 statement:
   Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$.
-proof.sketch:
+proof:
   This follows from the standard associativity theorem for natural addition.
 -/
 theorem my_add_assoc (a b c : Nat) :

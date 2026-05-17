@@ -14,7 +14,7 @@ const declarationPattern =
 const supportedSelectors = [
   "lean.statement",
   "lean.proof",
-  "proof.sketch",
+  "proof",
   "statement"
 ];
 

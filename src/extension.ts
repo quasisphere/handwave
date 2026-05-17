@@ -165,7 +165,7 @@ class HandwaveController
       const markdown = new vscode.MarkdownString();
       markdown.appendMarkdown(`**${resolved.title}**\n\n`);
       const parsedTarget = parseTarget(ref.target);
-      if (parsedTarget.selector === "statement" || parsedTarget.selector === "proof.sketch") {
+      if (parsedTarget.selector === "statement" || parsedTarget.selector === "proof") {
         markdown.appendMarkdown(resolved.preview);
       } else {
         markdown.appendCodeblock(resolved.preview, "lean");

@@ -5,7 +5,7 @@ The central observation is that
 
 @include{lean:my_add_assoc}
 
-@include{lean:my_add_assoc.proof.sketch}
+@include{lean:my_add_assoc.proof}
 
 @include{lean:double}
 

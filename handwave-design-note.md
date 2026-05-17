@@ -42,7 +42,7 @@ name:
   Addition associativity
 statement:
   Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$.
-proof.sketch:
+proof:
   This follows from the standard associativity theorem for natural addition.
 -/
 theorem my_add_assoc (a b c : Nat) :
@@ -91,7 +91,7 @@ Target kinds may include:
 
 - `lean:Nat.add_assoc`
 - `lean:Nat.add_assoc.statement`
-- `lean:Nat.add_assoc.proof.sketch`
+- `lean:Nat.add_assoc.proof`
 - `article:NaturalNumbers/Add#associativity`
 - `local:#triple_sum_assoc`
 - `term:monoid`
@@ -105,7 +105,7 @@ Articles should be able to import theorem statements, proof sketches, explanatio
 ```text
 @include{lean:Nat.add_assoc}
 @include{lean:Nat.add_assoc.statement}
-@include{lean:Nat.add_assoc.proof.sketch}
+@include{lean:Nat.add_assoc.proof}
 ```
 
 Rendered articles show the resolved content inline, but source files keep only references. This should make summaries and survey articles easier to maintain as the formal library evolves.
@@ -116,7 +116,7 @@ Useful selectors may include:
 .statement
 .lean.statement
 .lean.proof
-.proof.sketch
+.proof
 .examples
 .dependencies(depth=1)
 ```

@@ -38,6 +38,8 @@ The library side should probably remain valid Lean. For declarations that need l
 ```lean
 /--
 %%handwave
+name:
+  Addition associativity
 statement:
   Addition of natural numbers is associative.
 proof.sketch:
@@ -61,6 +63,10 @@ The central observation is that
 
 @include{lean:Nat.add_assoc}
 ```
+
+When a `name` field is present, rendered declarations show it in the label,
+such as **Theorem (Addition associativity).** or **Definition (Riemann surface).**
+Without a `name`, the label remains **Theorem.** or **Definition.**
 
 The exact syntax is less important than the model:
 

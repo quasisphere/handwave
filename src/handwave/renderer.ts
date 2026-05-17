@@ -276,12 +276,13 @@ function renderTheoremView(
     `See the Lean statement for ${declaration.name}.`;
   const proseProof = declaration.doc?.fields["proof.sketch"] ?? "No prose proof sketch has been written yet.";
   const leanProof = declaration.leanProof ?? declaration.statement;
+  const label = declarationLabel("Theorem", declaration);
 
   return compactHtml(`
     <section class="theorem-view" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="prose">
         <div class="section-heading">
-          <p class="theorem-line"><strong>Theorem.</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
+          <p class="theorem-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
           <button class="toggle-view" type="button" data-toggle-view="statement" aria-pressed="false">Lean</button>
         </div>
         <pre class="lean-content"><code>${escapeHtml(declaration.leanStatement)}</code></pre>
@@ -308,12 +309,13 @@ function renderDefinitionView(
   const proseStatement =
     declaration.doc?.fields.statement ??
     `See the Lean definition for ${declaration.name}.`;
+  const label = declarationLabel("Definition", declaration);
 
   return compactHtml(`
     <section class="definition-view" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="prose">
         <div class="section-heading">
-          <p class="definition-line"><strong>Definition.</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
+          <p class="definition-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
           <button class="toggle-view" type="button" data-toggle-view="statement" aria-pressed="false">Lean</button>
         </div>
         <pre class="lean-content"><code>${escapeHtml(declaration.statement)}</code></pre>
@@ -324,6 +326,15 @@ function renderDefinitionView(
 
 function isTheoremLike(declaration: LeanDeclaration): boolean {
   return declaration.kind === "theorem" || declaration.kind === "lemma";
+}
+
+function declarationLabel(baseLabel: string, declaration: LeanDeclaration): string {
+  const displayName = declaration.doc?.fields.name?.trim();
+  if (!displayName) {
+    return `${escapeHtml(baseLabel)}.`;
+  }
+
+  return `${escapeHtml(baseLabel)} (${escapeHtml(displayName)}).`;
 }
 
 function slugForHeading(title: string): string {

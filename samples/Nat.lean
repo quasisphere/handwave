@@ -1,5 +1,7 @@
 /--
 %%handwave
+name:
+  Addition associativity
 statement:
   Addition of natural numbers is associative.
 proof.sketch:
@@ -11,6 +13,8 @@ theorem my_add_assoc (a b c : Nat) :
 
 /--
 %%handwave
+name:
+  Double
 statement:
   Doubling a natural number means adding it to itself.
 -/

@@ -7,6 +7,8 @@ import { renderArticleHtml } from "../handwave/renderer";
 
 const leanText = `/--
 %%handwave
+name:
+  Addition associativity
 statement:
   Addition of natural numbers is associative.
 proof.sketch:
@@ -18,6 +20,8 @@ theorem my_add_assoc (a b c : Nat) :
 
 /--
 %%handwave
+name:
+  Double
 statement:
   Doubling a natural number means adding it to itself.
 -/
@@ -35,11 +39,30 @@ The central observation is that
 [broken](lean:Missing.add_assoc)
 `;
 
+const unnamedLeanText = `/--
+%%handwave
+statement:
+  Multiplication by one leaves a natural number unchanged.
+proof.sketch:
+  Use the identity law for multiplication.
+-/
+theorem mul_one_right (n : Nat) : n * 1 = n := by
+  exact Nat.mul_one n
+
+/--
+%%handwave
+statement:
+  The successor alias returns the next natural number.
+-/
+def nextNat (n : Nat) : Nat := n + 1
+`;
+
 test("parses Handwave Lean doc comments and declarations", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
 
   assert.equal(declarations.length, 2);
   assert.equal(declarations[0].name, "my_add_assoc");
+  assert.equal(declarations[0].doc?.fields.name, "Addition associativity");
   assert.equal(
     declarations[0].doc?.fields.statement,
     "Addition of natural numbers is associative."
@@ -54,6 +77,7 @@ test("parses Handwave definitions", () => {
   const definition = declarations.find((declaration) => declaration.name === "double");
 
   assert.equal(definition?.kind, "def");
+  assert.equal(definition?.doc?.fields.name, "Double");
   assert.equal(definition?.doc?.fields.statement, "Doubling a natural number means adding it to itself.");
   assert.equal(definition?.leanStatement, "def double (n : Nat) : Nat");
   assert.equal(definition?.leanProof, "n + n");
@@ -128,7 +152,7 @@ test("renders Lean statement includes as theorem views", () => {
   const index = new HandwaveIndex("/workspace", declarations, [article]);
   const html = renderArticleHtml(articleText, "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
 
-  assert.match(html, /<strong>Theorem\.<\/strong>/);
+  assert.match(html, /<strong>Theorem \(Addition associativity\)\.<\/strong>/);
   assert.match(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
   assert.match(html, /data-toggle-view="statement"/);
   assert.match(html, /data-toggle-view="proof"/);
@@ -154,8 +178,21 @@ test("renders definition includes as definition views", () => {
   const html = renderArticleHtml("@include{lean:double}", "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
 
   assert.match(html, /class="definition-view"/);
-  assert.match(html, /<strong>Definition\.<\/strong>/);
+  assert.match(html, /<strong>Definition \(Double\)\.<\/strong>/);
   assert.match(html, /Doubling a natural number means adding it to itself\./);
   assert.match(html, /def double \(n : Nat\) : Nat := n \+ n/);
   assert.doesNotMatch(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
+});
+
+test("renders unnamed theorem and definition labels plainly", () => {
+  const declarations = parseLeanDocument(unnamedLeanText, "/workspace/Unnamed.lean");
+  const articleText = "@include{lean:mul_one_right}\n\n@include{lean:nextNat}";
+  const article = parseArticleDocument(articleText, "/workspace/unnamed.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml(articleText, "/workspace/unnamed.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /<strong>Theorem\.<\/strong>/);
+  assert.match(html, /<strong>Definition\.<\/strong>/);
+  assert.doesNotMatch(html, /Theorem \(/);
+  assert.doesNotMatch(html, /Definition \(/);
 });

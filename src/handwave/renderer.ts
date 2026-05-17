@@ -13,7 +13,7 @@ export function renderArticleHtml(
     if (parsedTarget.kind === "lean" && !parsedTarget.selector) {
       const declaration = index.leanDeclarations.get(parsedTarget.base);
       if (declaration) {
-        return renderTheoremView(declaration, target, commandHref);
+        return renderDeclarationPackage(declaration, target, commandHref);
       }
     }
 
@@ -80,17 +80,20 @@ export function renderArticleHtml(
       margin: 1em 0;
       white-space: pre-wrap;
     }
-    .theorem-view {
+    .theorem-view,
+    .definition-view {
       border: 1px solid var(--border);
       border-radius: 6px;
       background: var(--surface);
       margin: 1.25em 0;
       padding: 16px;
     }
-    .theorem-statement {
+    .theorem-statement,
+    .definition-statement {
       margin: 0 0 1em;
     }
-    .theorem-line {
+    .theorem-line,
+    .definition-line {
       margin: 0;
     }
     .section-heading {
@@ -116,7 +119,8 @@ export function renderArticleHtml(
     .toggle-view:hover {
       background: var(--vscode-button-secondaryHoverBackground, var(--surface));
     }
-    .theorem-view pre {
+    .theorem-view pre,
+    .definition-view pre {
       margin: 0;
       white-space: pre-wrap;
     }
@@ -222,7 +226,11 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
       continue;
     }
 
-    if (line.startsWith("<div class=\"include\"") || line.startsWith("<section class=\"theorem-view\"")) {
+    if (
+      line.startsWith("<div class=\"include\"") ||
+      line.startsWith("<section class=\"theorem-view\"") ||
+      line.startsWith("<section class=\"definition-view\"")
+    ) {
       flushParagraph();
       blocks.push(line);
       continue;
@@ -244,6 +252,18 @@ function renderInlineMarkdown(text: string, commandHref: (target: string) => str
   return escaped.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label: string, target: string) => {
     return `<a href="${escapeHtml(commandHref(target))}" title="${escapeHtml(target)}">${label}</a>`;
   });
+}
+
+function renderDeclarationPackage(
+  declaration: LeanDeclaration,
+  target: string,
+  commandHref: (target: string) => string
+): string {
+  if (isTheoremLike(declaration)) {
+    return renderTheoremView(declaration, target, commandHref);
+  }
+
+  return renderDefinitionView(declaration, target, commandHref);
 }
 
 function renderTheoremView(
@@ -278,6 +298,32 @@ function renderTheoremView(
       </details>
     </section>
   `);
+}
+
+function renderDefinitionView(
+  declaration: LeanDeclaration,
+  target: string,
+  commandHref: (target: string) => string
+): string {
+  const proseStatement =
+    declaration.doc?.fields.statement ??
+    `See the Lean definition for ${declaration.name}.`;
+
+  return compactHtml(`
+    <section class="definition-view" data-target="${escapeHtml(target)}">
+      <div class="definition-statement" data-section="statement" data-mode="prose">
+        <div class="section-heading">
+          <p class="definition-line"><strong>Definition.</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
+          <button class="toggle-view" type="button" data-toggle-view="statement" aria-pressed="false">Lean</button>
+        </div>
+        <pre class="lean-content"><code>${escapeHtml(declaration.statement)}</code></pre>
+      </div>
+    </section>
+  `);
+}
+
+function isTheoremLike(declaration: LeanDeclaration): boolean {
+  return declaration.kind === "theorem" || declaration.kind === "lemma";
 }
 
 function slugForHeading(title: string): string {

@@ -15,6 +15,13 @@ proof.sketch:
 theorem my_add_assoc (a b c : Nat) :
     (a + b) + c = a + (b + c) := by
   exact Nat.add_assoc a b c
+
+/--
+%%handwave
+statement:
+  Doubling a natural number means adding it to itself.
+-/
+def double (n : Nat) : Nat := n + n
 `;
 
 const articleText = `# Associativity
@@ -31,7 +38,7 @@ The central observation is that
 test("parses Handwave Lean doc comments and declarations", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
 
-  assert.equal(declarations.length, 1);
+  assert.equal(declarations.length, 2);
   assert.equal(declarations[0].name, "my_add_assoc");
   assert.equal(
     declarations[0].doc?.fields.statement,
@@ -40,6 +47,16 @@ test("parses Handwave Lean doc comments and declarations", () => {
   assert.match(declarations[0].statement, /^theorem my_add_assoc/);
   assert.match(declarations[0].leanStatement, /^theorem my_add_assoc/);
   assert.equal(declarations[0].leanProof, "by\n  exact Nat.add_assoc a b c");
+});
+
+test("parses Handwave definitions", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const definition = declarations.find((declaration) => declaration.name === "double");
+
+  assert.equal(definition?.kind, "def");
+  assert.equal(definition?.doc?.fields.statement, "Doubling a natural number means adding it to itself.");
+  assert.equal(definition?.leanStatement, "def double (n : Nat) : Nat");
+  assert.equal(definition?.leanProof, "n + n");
 });
 
 test("parses article headings, links, and includes", () => {
@@ -128,4 +145,17 @@ test("renders explicit Lean statement selectors as plain includes", () => {
 
   assert.doesNotMatch(html, /class="theorem-view"/);
   assert.match(html, /<div class="include"/);
+});
+
+test("renders definition includes as definition views", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const article = parseArticleDocument("@include{lean:double}", "/workspace/natural-numbers.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml("@include{lean:double}", "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /class="definition-view"/);
+  assert.match(html, /<strong>Definition\.<\/strong>/);
+  assert.match(html, /Doubling a natural number means adding it to itself\./);
+  assert.match(html, /def double \(n : Nat\) : Nat := n \+ n/);
+  assert.doesNotMatch(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
 });

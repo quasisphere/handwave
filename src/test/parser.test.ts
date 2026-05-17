@@ -10,7 +10,7 @@ const leanText = `/--
 name:
   Addition associativity
 statement:
-  Addition of natural numbers is associative.
+  Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$.
 proof.sketch:
   Use the standard associativity theorem.
 -/
@@ -23,7 +23,7 @@ theorem my_add_assoc (a b c : Nat) :
 name:
   Double
 statement:
-  Doubling a natural number means adding it to itself.
+  Doubling a natural number means adding it to itself: $\\operatorname{double}(n) = n + n$.
 -/
 def double (n : Nat) : Nat := n + n
 `;
@@ -65,7 +65,7 @@ test("parses Handwave Lean doc comments and declarations", () => {
   assert.equal(declarations[0].doc?.fields.name, "Addition associativity");
   assert.equal(
     declarations[0].doc?.fields.statement,
-    "Addition of natural numbers is associative."
+    "Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$."
   );
   assert.match(declarations[0].statement, /^theorem my_add_assoc/);
   assert.match(declarations[0].leanStatement, /^theorem my_add_assoc/);
@@ -78,7 +78,7 @@ test("parses Handwave definitions", () => {
 
   assert.equal(definition?.kind, "def");
   assert.equal(definition?.doc?.fields.name, "Double");
-  assert.equal(definition?.doc?.fields.statement, "Doubling a natural number means adding it to itself.");
+  assert.equal(definition?.doc?.fields.statement, "Doubling a natural number means adding it to itself: $\\operatorname{double}(n) = n + n$.");
   assert.equal(definition?.leanStatement, "def double (n : Nat) : Nat");
   assert.equal(definition?.leanProof, "n + n");
 });
@@ -124,7 +124,7 @@ test("resolves Lean selectors, article targets, and local targets", () => {
   );
   assert.equal(
     index.resolve("lean:my_add_assoc.statement")?.preview,
-    "Addition of natural numbers is associative."
+    "Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$."
   );
   assert.match(index.resolve("lean:my_add_assoc.lean.statement")?.preview ?? "", /^theorem my_add_assoc/);
   assert.equal(index.resolve("lean:my_add_assoc.lean.proof")?.preview, "by\n  exact Nat.add_assoc a b c");
@@ -156,7 +156,7 @@ test("renders Lean statement includes as theorem views", () => {
   assert.match(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
   assert.match(html, /data-toggle-view="statement"/);
   assert.match(html, /data-toggle-view="proof"/);
-  assert.match(html, /Addition of natural numbers is associative\./);
+  assert.match(html, /Addition of natural numbers is associative: \$\(a \+ b\) \+ c = a \+ \(b \+ c\)\$\./);
   assert.match(html, /Use the standard associativity theorem\./);
   assert.match(html, /exact Nat\.add_assoc a b c/);
 });
@@ -179,9 +179,20 @@ test("renders definition includes as definition views", () => {
 
   assert.match(html, /class="definition-view"/);
   assert.match(html, /<strong>Definition \(Double\)\.<\/strong>/);
-  assert.match(html, /Doubling a natural number means adding it to itself\./);
+  assert.match(html, /Doubling a natural number means adding it to itself: \$\\operatorname\{double\}\(n\) = n \+ n\$\./);
   assert.match(html, /def double \(n : Nat\) : Nat := n \+ n/);
   assert.doesNotMatch(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
+});
+
+test("enables MathJax for LaTeX formulas in rendered articles", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const article = parseArticleDocument("Inline math $x^2 + y^2 = z^2$.", "/workspace/math.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml("Inline math $x^2 + y^2 = z^2$.", "/workspace/math.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /window\.MathJax/);
+  assert.match(html, /tex-chtml\.js/);
+  assert.match(html, /\$x\^2 \+ y\^2 = z\^2\$/);
 });
 
 test("renders unnamed theorem and definition labels plainly", () => {

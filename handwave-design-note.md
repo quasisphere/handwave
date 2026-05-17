@@ -41,7 +41,7 @@ The library side should probably remain valid Lean. For declarations that need l
 name:
   Addition associativity
 statement:
-  Addition of natural numbers is associative.
+  Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$.
 proof.sketch:
   This follows from the standard associativity theorem for natural addition.
 -/
@@ -67,6 +67,8 @@ The central observation is that
 When a `name` field is present, rendered declarations show it in the label,
 such as **Theorem (Addition associativity).** or **Definition (Riemann surface).**
 Without a `name`, the label remains **Theorem.** or **Definition.**
+Rendered prose supports LaTeX math delimiters such as `$...$`, `\(...\)`,
+`$$...$$`, and `\[...\]`.
 
 The exact syntax is less important than the model:
 

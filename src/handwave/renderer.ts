@@ -96,28 +96,37 @@ export function renderArticleHtml(
     .definition-line {
       margin: 0;
     }
-    .section-heading {
-      align-items: center;
-      display: flex;
-      gap: 12px;
-      justify-content: space-between;
-      margin-bottom: 0.5em;
-    }
-    .section-heading strong {
+    .theorem-line strong,
+    .definition-line strong,
+    .proof-line strong {
       font-size: 1em;
     }
-    .toggle-view {
-      background: var(--vscode-button-secondaryBackground, transparent);
+    .view-switch {
+      align-items: center;
+      display: inline-flex;
+      gap: 2px;
+      margin-bottom: 0.45em;
+    }
+    .mode-control {
+      background: transparent;
       border: 1px solid var(--border);
       border-radius: 4px;
       color: var(--vscode-button-secondaryForeground, currentColor);
       cursor: pointer;
       font: inherit;
+      font-size: 0.72em;
+      font-variant: small-caps;
+      letter-spacing: 0;
       line-height: 1.2;
-      padding: 3px 8px;
+      padding: 2px 6px;
+      text-transform: lowercase;
     }
-    .toggle-view:hover {
+    .mode-control:hover {
       background: var(--vscode-button-secondaryHoverBackground, var(--surface));
+    }
+    .mode-control[aria-pressed="true"] {
+      background: var(--vscode-button-secondaryBackground, var(--surface));
+      border-color: color-mix(in srgb, currentColor 34%, transparent);
     }
     .theorem-view pre,
     .definition-view pre {
@@ -125,20 +134,16 @@ export function renderArticleHtml(
       white-space: pre-wrap;
     }
     [data-mode="prose"] .lean-content,
-    [data-mode="lean"] .prose-content {
+    [data-mode="lean"] .prose-content,
+    [data-mode="collapsed"] .proof-content {
       display: none;
     }
     .proof-section {
       border-top: 1px solid var(--border);
       padding-top: 0.9em;
     }
-    .proof-section summary {
-      cursor: pointer;
-      list-style-position: outside;
+    .proof-line {
       margin-bottom: 0.5em;
-    }
-    .proof-section summary::marker {
-      color: var(--muted);
     }
     .proof-body {
       margin-left: 1.25em;
@@ -177,7 +182,7 @@ export function renderArticleHtml(
 ${body}
 <script>
   document.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-toggle-view]");
+    const button = event.target.closest("[data-set-mode]");
     if (!button) {
       return;
     }
@@ -187,10 +192,11 @@ ${body}
       return;
     }
 
-    const nextMode = section.dataset.mode === "lean" ? "prose" : "lean";
+    const nextMode = button.dataset.setMode;
     section.dataset.mode = nextMode;
-    button.textContent = nextMode === "lean" ? "Prose" : "Lean";
-    button.setAttribute("aria-pressed", String(nextMode === "lean"));
+    for (const control of section.querySelectorAll("[data-set-mode]")) {
+      control.setAttribute("aria-pressed", String(control.dataset.setMode === nextMode));
+    }
   });
 </script>
 </body>
@@ -299,22 +305,27 @@ function renderTheoremView(
   return compactHtml(`
     <section class="theorem-view" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="prose">
-        <div class="section-heading">
-          <p class="theorem-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
-          <button class="toggle-view" type="button" data-toggle-view="statement" aria-pressed="false">Lean</button>
+        <div class="view-switch" role="group" aria-label="Theorem view">
+          <button class="mode-control" type="button" data-set-mode="prose" aria-pressed="true">prose</button>
+          <button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button>
         </div>
+        <p class="theorem-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
         <pre class="lean-content"><code>${escapeHtml(declaration.leanStatement)}</code></pre>
       </div>
-      <details class="proof-section" open>
-        <summary><strong>Proof.</strong></summary>
-        <div class="proof-body" data-section="proof" data-mode="prose">
-          <div class="section-heading">
-            <div class="prose-content">${renderInlineMarkdown(proseProof, commandHref).replace(/\r?\n/g, "<br>")}</div>
-            <button class="toggle-view" type="button" data-toggle-view="proof" aria-pressed="false">Lean</button>
-          </div>
-          <pre class="lean-content"><code>${escapeHtml(leanProof)}</code></pre>
+      <div class="proof-section" data-section="proof" data-mode="prose">
+        <div class="view-switch" role="group" aria-label="Proof view">
+          <button class="mode-control" type="button" data-set-mode="prose" aria-pressed="true">prose</button>
+          <button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button>
+          <button class="mode-control" type="button" data-set-mode="collapsed" aria-pressed="false">collapsed</button>
         </div>
-      </details>
+        <p class="proof-line"><strong>Proof.</strong></p>
+        <div class="proof-content">
+          <div class="proof-body">
+            <div class="prose-content">${renderInlineMarkdown(proseProof, commandHref).replace(/\r?\n/g, "<br>")}</div>
+            <pre class="lean-content"><code>${escapeHtml(leanProof)}</code></pre>
+          </div>
+        </div>
+      </div>
     </section>
   `);
 }
@@ -332,10 +343,11 @@ function renderDefinitionView(
   return compactHtml(`
     <section class="definition-view" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="prose">
-        <div class="section-heading">
-          <p class="definition-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
-          <button class="toggle-view" type="button" data-toggle-view="statement" aria-pressed="false">Lean</button>
+        <div class="view-switch" role="group" aria-label="Definition view">
+          <button class="mode-control" type="button" data-set-mode="prose" aria-pressed="true">prose</button>
+          <button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button>
         </div>
+        <p class="definition-line"><strong>${label}</strong> <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
         <pre class="lean-content"><code>${escapeHtml(declaration.statement)}</code></pre>
       </div>
     </section>

@@ -153,9 +153,12 @@ test("renders Lean statement includes as theorem views", () => {
   const html = renderArticleHtml(articleText, "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
 
   assert.match(html, /<strong>Theorem \(Addition associativity\)\.<\/strong>/);
-  assert.match(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
-  assert.match(html, /data-toggle-view="statement"/);
-  assert.match(html, /data-toggle-view="proof"/);
+  assert.match(html, /<p class="proof-line"><strong>Proof\.<\/strong><\/p>/);
+  assert.match(html, /aria-label="Theorem view"/);
+  assert.match(html, /aria-label="Proof view"/);
+  assert.match(html, /data-set-mode="prose"/);
+  assert.match(html, /data-set-mode="lean"/);
+  assert.match(html, /data-set-mode="collapsed"/);
   assert.match(html, /Addition of natural numbers is associative: \$\(a \+ b\) \+ c = a \+ \(b \+ c\)\$\./);
   assert.match(html, /Use the standard associativity theorem\./);
   assert.match(html, /exact Nat\.add_assoc a b c/);
@@ -179,9 +182,10 @@ test("renders definition includes as definition views", () => {
 
   assert.match(html, /class="definition-view"/);
   assert.match(html, /<strong>Definition \(Double\)\.<\/strong>/);
+  assert.match(html, /aria-label="Definition view"/);
   assert.match(html, /Doubling a natural number means adding it to itself: \$\\operatorname\{double\}\(n\) = n \+ n\$\./);
   assert.match(html, /def double \(n : Nat\) : Nat := n \+ n/);
-  assert.doesNotMatch(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
+  assert.doesNotMatch(html, /<p class="proof-line"><strong>Proof\.<\/strong><\/p>/);
 });
 
 test("enables MathJax for LaTeX formulas in rendered articles", () => {

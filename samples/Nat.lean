@@ -1,11 +1,7 @@
 /--
 %%handwave
-id: algebra.nat.add_assoc
-prose.short:
+statement:
   Addition of natural numbers is associative.
-prose.long:
-  When adding three natural numbers, the placement of parentheses does not
-  change the final result.
 proof.sketch:
   This follows from the standard associativity theorem for natural addition.
 -/

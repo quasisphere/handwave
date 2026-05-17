@@ -82,16 +82,6 @@ function addTargetDiagnostic(
     return;
   }
 
-  if (isInclude && !target.selector && (target.kind === "lean" || target.kind === "doc")) {
-    issues.push({
-      uri: fromUri,
-      message: `Transclusion '${rawTarget}' should include a selector such as .statement or .prose.short.`,
-      range,
-      severity: "warning"
-    });
-    return;
-  }
-
   if (!index.resolveParsed(target, fromUri)) {
     issues.push({
       uri: fromUri,

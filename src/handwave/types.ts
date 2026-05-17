@@ -14,7 +14,6 @@ export interface SourceLocation {
 }
 
 export interface HandwaveDoc {
-  id?: string;
   fields: Record<string, string>;
   range: RangeLike;
   errors: ParseIssue[];
@@ -24,6 +23,8 @@ export interface LeanDeclaration {
   name: string;
   kind: string;
   statement: string;
+  leanStatement: string;
+  leanProof?: string;
   range: RangeLike;
   nameRange: RangeLike;
   doc?: HandwaveDoc;
@@ -62,7 +63,7 @@ export interface ParseIssue {
   range: RangeLike;
 }
 
-export type TargetKind = "lean" | "doc" | "article" | "local" | "term" | "unknown";
+export type TargetKind = "lean" | "article" | "local" | "term" | "unknown";
 
 export interface ParsedTarget {
   raw: string;

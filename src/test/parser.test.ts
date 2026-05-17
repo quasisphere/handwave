@@ -3,11 +3,11 @@ import { test } from "node:test";
 import { HandwaveIndex } from "../handwave/index";
 import { parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
+import { renderArticleHtml } from "../handwave/renderer";
 
 const leanText = `/--
 %%handwave
-id: algebra.nat.add_assoc
-prose.short:
+statement:
   Addition of natural numbers is associative.
 proof.sketch:
   Use the standard associativity theorem.
@@ -22,8 +22,8 @@ const articleText = `# Associativity
 The central observation is that
 [parentheses do not matter](lean:my_add_assoc).
 
-@include{lean:my_add_assoc.statement}
-@include{doc:algebra.nat.add_assoc.proof.sketch}
+@include{lean:my_add_assoc}
+@include{lean:my_add_assoc.proof.sketch}
 
 [broken](lean:Missing.add_assoc)
 `;
@@ -33,12 +33,13 @@ test("parses Handwave Lean doc comments and declarations", () => {
 
   assert.equal(declarations.length, 1);
   assert.equal(declarations[0].name, "my_add_assoc");
-  assert.equal(declarations[0].doc?.id, "algebra.nat.add_assoc");
   assert.equal(
-    declarations[0].doc?.fields["prose.short"],
+    declarations[0].doc?.fields.statement,
     "Addition of natural numbers is associative."
   );
   assert.match(declarations[0].statement, /^theorem my_add_assoc/);
+  assert.match(declarations[0].leanStatement, /^theorem my_add_assoc/);
+  assert.equal(declarations[0].leanProof, "by\n  exact Nat.add_assoc a b c");
 });
 
 test("parses article headings, links, and includes", () => {
@@ -48,7 +49,8 @@ test("parses article headings, links, and includes", () => {
   assert.equal(article.links.length, 2);
   assert.equal(article.links[0].target, "lean:my_add_assoc");
   assert.equal(article.includes.length, 2);
-  assert.equal(article.includes[1].target, "doc:algebra.nat.add_assoc.proof.sketch");
+  assert.equal(article.includes[0].target, "lean:my_add_assoc");
+  assert.equal(article.includes[1].target, "lean:my_add_assoc.proof.sketch");
 });
 
 test("parses targets and selectors", () => {
@@ -69,16 +71,22 @@ test("parses targets and selectors", () => {
   });
 });
 
-test("resolves Lean, doc, article, and local targets", () => {
+test("resolves Lean selectors, article targets, and local targets", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
   const article = parseArticleDocument(articleText, "/workspace/natural-numbers.hw.md");
   const index = new HandwaveIndex("/workspace", declarations, [article]);
 
   assert.equal(index.resolve("lean:my_add_assoc")?.title, "my_add_assoc");
   assert.equal(
-    index.resolve("doc:algebra.nat.add_assoc.proof.sketch")?.preview,
+    index.resolve("lean:my_add_assoc.proof.sketch")?.preview,
     "Use the standard associativity theorem."
   );
+  assert.equal(
+    index.resolve("lean:my_add_assoc.statement")?.preview,
+    "Addition of natural numbers is associative."
+  );
+  assert.match(index.resolve("lean:my_add_assoc.lean.statement")?.preview ?? "", /^theorem my_add_assoc/);
+  assert.equal(index.resolve("lean:my_add_assoc.lean.proof")?.preview, "by\n  exact Nat.add_assoc a b c");
   assert.equal(index.resolve("article:natural-numbers#associativity")?.title, "Associativity");
   assert.equal(index.resolve("local:#associativity", "/workspace/natural-numbers.hw.md")?.title, "Associativity");
 });
@@ -95,4 +103,29 @@ test("reports unresolved links but leaves term links alone", () => {
 
 test("slugifies section titles", () => {
   assert.equal(slugify("Repeated Addition!"), "repeated-addition");
+});
+
+test("renders Lean statement includes as theorem views", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const article = parseArticleDocument(articleText, "/workspace/natural-numbers.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml(articleText, "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /<strong>Theorem\.<\/strong>/);
+  assert.match(html, /<summary><strong>Proof\.<\/strong><\/summary>/);
+  assert.match(html, /data-toggle-view="statement"/);
+  assert.match(html, /data-toggle-view="proof"/);
+  assert.match(html, /Addition of natural numbers is associative\./);
+  assert.match(html, /Use the standard associativity theorem\./);
+  assert.match(html, /exact Nat\.add_assoc a b c/);
+});
+
+test("renders explicit Lean statement selectors as plain includes", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const article = parseArticleDocument("@include{lean:my_add_assoc.lean.statement}", "/workspace/natural-numbers.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml("@include{lean:my_add_assoc.lean.statement}", "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
+
+  assert.doesNotMatch(html, /class="theorem-view"/);
+  assert.match(html, /<div class="include"/);
 });

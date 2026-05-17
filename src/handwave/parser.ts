@@ -12,9 +12,9 @@ const declarationPattern =
   /\b(theorem|lemma|def|abbrev|instance|structure|class|inductive)\s+([A-Za-z_][A-Za-z0-9_'.]*|«[^»]+»)/g;
 
 const supportedSelectors = [
+  "lean.statement",
+  "lean.proof",
   "proof.sketch",
-  "prose.short",
-  "prose.long",
   "statement"
 ];
 
@@ -42,10 +42,14 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const declStart = comment.end + match.index;
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const statementEnd = findDeclarationStatementEnd(text, declStart);
+    const declarationText = text.slice(declStart, statementEnd).trim();
+    const parts = splitLeanDeclaration(declarationText);
     declarations.push({
       name: stripLeanEscapes(match[2]),
       kind: match[1],
-      statement: text.slice(declStart, statementEnd).trim(),
+      statement: declarationText,
+      leanStatement: parts.leanStatement,
+      leanProof: parts.leanProof,
       range: rangeFromOffsets(text, declStart, statementEnd),
       nameRange: rangeFromOffsets(text, nameStart, nameStart + match[2].length),
       doc,
@@ -63,10 +67,14 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const declStart = match.index ?? 0;
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const statementEnd = findDeclarationStatementEnd(text, declStart);
+    const declarationText = text.slice(declStart, statementEnd).trim();
+    const parts = splitLeanDeclaration(declarationText);
     declarations.push({
       name,
       kind: match[1],
-      statement: text.slice(declStart, statementEnd).trim(),
+      statement: declarationText,
+      leanStatement: parts.leanStatement,
+      leanProof: parts.leanProof,
       range: rangeFromOffsets(text, declStart, statementEnd),
       nameRange: rangeFromOffsets(text, nameStart, nameStart + match[2].length),
       uri
@@ -142,10 +150,6 @@ export function parseTarget(raw: string): ParsedTarget {
     case "lean": {
       const { base, selector } = splitSelector(body);
       return { raw, kind: "lean", body, base, selector };
-    }
-    case "doc": {
-      const { base, selector } = splitSelector(body);
-      return { raw, kind: "doc", body, base, selector };
     }
     case "article": {
       const hashIndex = body.indexOf("#");
@@ -255,15 +259,8 @@ function parseHandwaveDoc(comment: string, range: RangeLike, sourceText: string)
 
   flush();
 
-  if (!fields.id) {
-    errors.push({
-      message: "Handwave doc block is missing required id field.",
-      range
-    });
-  }
-
-  const { id, ...rest } = fields;
-  return { id, fields: rest, range, errors };
+  const { id: _unusedId, ...rest } = fields;
+  return { fields: rest, range, errors };
 }
 
 function findDeclarationStatementEnd(text: string, start: number): number {
@@ -294,4 +291,21 @@ function stripLeanEscapes(name: string): string {
     return name.slice(1, -1);
   }
   return name;
+}
+
+function splitLeanDeclaration(declarationText: string): { leanStatement: string; leanProof?: string } {
+  const proofStart = declarationText.search(/\s:=\s*(by\b)?/);
+  if (proofStart < 0) {
+    return { leanStatement: declarationText };
+  }
+
+  const prefix = declarationText.slice(0, proofStart).trimEnd();
+  const proofMarker = declarationText.slice(proofStart).match(/^\s:=\s*/);
+  const proofOffset = proofStart + (proofMarker?.[0].length ?? 0);
+  const proof = declarationText.slice(proofOffset).trim();
+
+  return {
+    leanStatement: prefix,
+    leanProof: proof || undefined
+  };
 }

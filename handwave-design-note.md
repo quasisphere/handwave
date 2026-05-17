@@ -38,12 +38,8 @@ The library side should probably remain valid Lean. For declarations that need l
 ```lean
 /--
 %%handwave
-id: algebra.nat.add_assoc
-prose.short:
+statement:
   Addition of natural numbers is associative.
-prose.long:
-  When adding three natural numbers, the placement of parentheses does not
-  change the final result.
 proof.sketch:
   This follows from the standard associativity theorem for natural addition.
 -/
@@ -63,14 +59,12 @@ The article side can use a Verso-like syntax with extra Handwave commands:
 The central observation is that
 [parentheses do not matter for repeated addition](lean:Nat.add_assoc).
 
-@include{lean:Nat.add_assoc.statement}
-@include{lean:Nat.add_assoc.prose.short}
-@include{lean:Nat.add_assoc.proof.sketch}
+@include{lean:Nat.add_assoc}
 ```
 
 The exact syntax is less important than the model:
 
-- every reusable item has a stable identity;
+- every reusable declaration-specific item is identified by its Lean name;
 - inclusions are live references, not copies;
 - links can target Lean declarations, local article blocks, or blocks in other articles;
 - rendered text can hide formal names when the prose reads better without them.
@@ -88,7 +82,8 @@ Links should attach to prose spans:
 Target kinds may include:
 
 - `lean:Nat.add_assoc`
-- `doc:algebra.nat.add_assoc.prose.long`
+- `lean:Nat.add_assoc.statement`
+- `lean:Nat.add_assoc.proof.sketch`
 - `article:NaturalNumbers/Add#associativity`
 - `local:#triple_sum_assoc`
 - `term:monoid`
@@ -100,9 +95,9 @@ The extension should provide validation, completion, hover previews, backlink di
 Articles should be able to import theorem statements, proof sketches, explanations, examples, and other reusable blocks without copying:
 
 ```text
+@include{lean:Nat.add_assoc}
 @include{lean:Nat.add_assoc.statement}
-@include{doc:algebra.nat.add_assoc.prose.long}
-@include{doc:algebra.nat.add_assoc.proof.sketch}
+@include{lean:Nat.add_assoc.proof.sketch}
 ```
 
 Rendered articles show the resolved content inline, but source files keep only references. This should make summaries and survey articles easier to maintain as the formal library evolves.
@@ -111,10 +106,9 @@ Useful selectors may include:
 
 ```text
 .statement
-.proof
+.lean.statement
+.lean.proof
 .proof.sketch
-.prose.short
-.prose.long
 .examples
 .dependencies(depth=1)
 ```
@@ -156,7 +150,7 @@ The custom editor does not need to replace the standard Lean editor. Most editin
 ## Open Questions
 
 - Should Handwave be implemented as an extension of Verso, or as a separate layer that can emit/use Verso?
-- What is the minimal stable id scheme: Lean names only, explicit Handwave ids, or both?
+- How should declaration renames update prose and article links when Lean names are the stable ids?
 - How should source maps work if article files contain checked Lean snippets or generated Lean?
 - How much prose should live in library files versus article files?
 - How should stale prose be detected: timestamps, hashes of theorem statements, elaborated signatures, or manual review markers?
@@ -169,7 +163,7 @@ The safest first prototype is probably:
 
 1. ordinary Lean files with optional `%%handwave` structured doc comments;
 2. article files with phrase links and `@include` transclusion commands;
-3. an indexer that resolves Lean names, article anchors, and Handwave ids;
+3. an indexer that resolves Lean names and article anchors;
 4. a simple renderer that turns articles into HTML;
 5. a VS Code extension that validates links and provides hover/jump support.
 

@@ -162,7 +162,15 @@ class HandwaveController
         return new vscode.Hover(`Unresolved Handwave target: \`${ref.target}\``);
       }
 
-      return new vscode.Hover(new vscode.MarkdownString(`**${resolved.title}**\n\n\`\`\`lean\n${resolved.preview}\n\`\`\``));
+      const markdown = new vscode.MarkdownString();
+      markdown.appendMarkdown(`**${resolved.title}**\n\n`);
+      const parsedTarget = parseTarget(ref.target);
+      if (parsedTarget.selector === "statement" || parsedTarget.selector === "proof.sketch") {
+        markdown.appendMarkdown(resolved.preview);
+      } else {
+        markdown.appendCodeblock(resolved.preview, "lean");
+      }
+      return new vscode.Hover(markdown);
     }
 
     const declaration = this.declarationAt(document.uri.fsPath, pos);
@@ -173,8 +181,8 @@ class HandwaveController
     const markdown = new vscode.MarkdownString();
     markdown.appendMarkdown(`**${declaration.name}**\n\n`);
     markdown.appendCodeblock(declaration.statement, "lean");
-    if (declaration.doc?.fields["prose.short"]) {
-      markdown.appendMarkdown(`\n${declaration.doc.fields["prose.short"]}`);
+    if (declaration.doc?.fields.statement) {
+      markdown.appendMarkdown(`\n${declaration.doc.fields.statement}`);
     }
     return new vscode.Hover(markdown);
   }
@@ -240,7 +248,7 @@ class HandwaveController
       "handwave.articlePreview",
       `Handwave: ${articleUri.path.split("/").pop() ?? "Article"}`,
       vscode.ViewColumn.Beside,
-      { enableCommandUris: true }
+      { enableCommandUris: true, enableScripts: true }
     );
 
     panel.webview.html = renderArticleHtml(text, articleUri.fsPath, this.index, (target) =>

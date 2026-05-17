@@ -1,7 +1,6 @@
 import {
   ArticleDocument,
   Backlink,
-  HandwaveDoc,
   LeanDeclaration,
   ParsedTarget,
   ResolvedTarget
@@ -10,7 +9,6 @@ import { isSupportedSelector, parseTarget } from "./parser";
 
 export class HandwaveIndex {
   readonly leanDeclarations = new Map<string, LeanDeclaration>();
-  readonly docs = new Map<string, { doc: HandwaveDoc; declaration: LeanDeclaration }>();
   readonly articles = new Map<string, ArticleDocument>();
   readonly articleKeys = new Map<string, string>();
   readonly backlinks = new Map<string, Backlink[]>();
@@ -22,9 +20,6 @@ export class HandwaveIndex {
   ) {
     for (const declaration of declarations) {
       this.leanDeclarations.set(declaration.name, declaration);
-      if (declaration.doc?.id) {
-        this.docs.set(declaration.doc.id, { doc: declaration.doc, declaration });
-      }
     }
 
     for (const article of articles) {
@@ -48,8 +43,6 @@ export class HandwaveIndex {
     switch (target.kind) {
       case "lean":
         return this.resolveLean(target);
-      case "doc":
-        return this.resolveDoc(target);
       case "article":
         return this.resolveArticle(target);
       case "local":
@@ -89,27 +82,6 @@ export class HandwaveIndex {
       uri: declaration.uri,
       range: declaration.nameRange,
       title: declaration.name,
-      preview,
-      key: canonicalTargetKey(target)
-    };
-  }
-
-  private resolveDoc(target: ParsedTarget): ResolvedTarget | undefined {
-    const entry = this.docs.get(target.base);
-    if (!entry) {
-      return undefined;
-    }
-
-    const preview = resolveSelectorText(target.selector, entry.declaration, entry.doc);
-    if (preview === undefined) {
-      return undefined;
-    }
-
-    return {
-      target,
-      uri: entry.declaration.uri,
-      range: entry.doc.range,
-      title: target.base,
       preview,
       key: canonicalTargetKey(target)
     };
@@ -190,7 +162,6 @@ export class HandwaveIndex {
 export function canonicalTargetKey(target: ParsedTarget): string {
   switch (target.kind) {
     case "lean":
-    case "doc":
       return `${target.kind}:${target.base}`;
     case "article":
       return `article:${target.base}${target.anchor ? `#${target.anchor}` : ""}`;
@@ -206,13 +177,21 @@ export function canonicalTargetKey(target: ParsedTarget): string {
 function resolveSelectorText(
   selector: string | undefined,
   declaration: LeanDeclaration,
-  doc: HandwaveDoc | undefined
+  handwaveDoc: LeanDeclaration["doc"]
 ): string | undefined {
-  if (!selector || selector === "statement") {
-    return declaration.statement;
+  if (!selector || selector === "lean.statement") {
+    return declaration.leanStatement;
   }
 
-  return doc?.fields[selector];
+  if (selector === "statement") {
+    return handwaveDoc?.fields.statement ?? declaration.leanStatement;
+  }
+
+  if (selector === "lean.proof") {
+    return declaration.leanProof;
+  }
+
+  return handwaveDoc?.fields[selector];
 }
 
 function articleKeys(uri: string, workspaceRoot: string): string[] {

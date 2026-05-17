@@ -1,0 +1,90 @@
+export interface PositionLike {
+  line: number;
+  character: number;
+}
+
+export interface RangeLike {
+  start: PositionLike;
+  end: PositionLike;
+}
+
+export interface SourceLocation {
+  uri: string;
+  range: RangeLike;
+}
+
+export interface HandwaveDoc {
+  id?: string;
+  fields: Record<string, string>;
+  range: RangeLike;
+  errors: ParseIssue[];
+}
+
+export interface LeanDeclaration {
+  name: string;
+  kind: string;
+  statement: string;
+  range: RangeLike;
+  nameRange: RangeLike;
+  doc?: HandwaveDoc;
+  uri: string;
+}
+
+export interface ArticleAnchor {
+  id: string;
+  title: string;
+  range: RangeLike;
+}
+
+export interface ArticleLink {
+  label: string;
+  target: string;
+  range: RangeLike;
+  targetRange: RangeLike;
+}
+
+export interface ArticleInclude {
+  target: string;
+  range: RangeLike;
+  targetRange: RangeLike;
+}
+
+export interface ArticleDocument {
+  uri: string;
+  anchors: ArticleAnchor[];
+  links: ArticleLink[];
+  includes: ArticleInclude[];
+  errors: ParseIssue[];
+}
+
+export interface ParseIssue {
+  message: string;
+  range: RangeLike;
+}
+
+export type TargetKind = "lean" | "doc" | "article" | "local" | "term" | "unknown";
+
+export interface ParsedTarget {
+  raw: string;
+  kind: TargetKind;
+  body: string;
+  base: string;
+  selector?: string;
+  anchor?: string;
+}
+
+export interface ResolvedTarget {
+  target: ParsedTarget;
+  uri: string;
+  range: RangeLike;
+  title: string;
+  preview: string;
+  key: string;
+}
+
+export interface Backlink {
+  fromUri: string;
+  range: RangeLike;
+  label: string;
+  target: string;
+}

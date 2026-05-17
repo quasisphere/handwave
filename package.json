@@ -1,0 +1,91 @@
+{
+  "name": "handwave",
+  "displayName": "Handwave",
+  "description": "Browse and preview Handwave articles linked to Lean declarations.",
+  "version": "0.0.1",
+  "publisher": "handwave",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:handwave.rebuildIndex",
+    "onCommand:handwave.openArticlePreview",
+    "onCommand:handwave.showBacklinks"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "handwave.rebuildIndex",
+        "title": "Handwave: Rebuild Index"
+      },
+      {
+        "command": "handwave.openArticlePreview",
+        "title": "Handwave: Open Article Preview"
+      },
+      {
+        "command": "handwave.showBacklinks",
+        "title": "Handwave: Show Backlinks"
+      }
+    ],
+    "configuration": {
+      "title": "Handwave",
+      "properties": {
+        "handwave.articleGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/*.hw.md",
+            "**/*.hw"
+          ],
+          "description": "Glob patterns for Handwave article files."
+        },
+        "handwave.leanGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/*.lean"
+          ],
+          "description": "Glob patterns for Lean files indexed by Handwave."
+        },
+        "handwave.enableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable diagnostics for unresolved Handwave links, includes, and malformed doc blocks."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "handwave-article",
+        "aliases": [
+          "Handwave Article",
+          "handwave"
+        ],
+        "extensions": [
+          ".hw",
+          ".hw.md"
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.8",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.2"
+  }
+}

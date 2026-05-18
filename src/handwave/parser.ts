@@ -41,11 +41,12 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
 
     const declStart = comment.end + match.index;
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
+    const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
     const statementEnd = findDeclarationStatementEnd(text, declStart);
     const declarationText = text.slice(declStart, statementEnd).trim();
     const parts = splitLeanDeclaration(declarationText);
     declarations.push({
-      name: stripLeanEscapes(match[2]),
+      name,
       kind: match[1],
       statement: declarationText,
       leanStatement: parts.leanStatement,
@@ -59,13 +60,13 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
 
   declarationPattern.lastIndex = 0;
   for (const match of text.matchAll(declarationPattern)) {
-    const name = stripLeanEscapes(match[2]);
+    const declStart = match.index ?? 0;
+    const nameStart = declStart + match[0].lastIndexOf(match[2]);
+    const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
     if (declarations.some((decl) => decl.name === name)) {
       continue;
     }
 
-    const declStart = match.index ?? 0;
-    const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const statementEnd = findDeclarationStatementEnd(text, declStart);
     const declarationText = text.slice(declStart, statementEnd).trim();
     const parts = splitLeanDeclaration(declarationText);
@@ -291,6 +292,50 @@ function stripLeanEscapes(name: string): string {
     return name.slice(1, -1);
   }
   return name;
+}
+
+function qualifyLeanName(text: string, declarationOffset: number, name: string): string {
+  const namespace = namespaceAt(text, declarationOffset);
+  if (!namespace.length) {
+    return name;
+  }
+  return `${namespace.join(".")}.${name}`;
+}
+
+function namespaceAt(text: string, offset: number): string[] {
+  const stack: string[] = [];
+  const namespacePattern =
+    /^\s*(?:namespace[ \t]+([A-Za-z_][A-Za-z0-9_'.]*(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)*)|end(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?)\b/gm;
+  const prefix = text.slice(0, offset);
+
+  for (const match of prefix.matchAll(namespacePattern)) {
+    const opened = match[1];
+    if (opened) {
+      stack.push(...opened.trim().split(/\s+/).flatMap((part) => part.split(".")).filter(Boolean));
+      continue;
+    }
+
+    const closed = match[2];
+    if (!closed) {
+      stack.pop();
+      continue;
+    }
+
+    const parts = closed.split(".").filter(Boolean);
+    if (parts.length === 0) {
+      stack.pop();
+      continue;
+    }
+
+    const suffixStart = stack.length - parts.length;
+    if (suffixStart >= 0 && parts.every((part, index) => stack[suffixStart + index] === part)) {
+      stack.splice(suffixStart);
+    } else {
+      stack.pop();
+    }
+  }
+
+  return stack;
 }
 
 function splitLeanDeclaration(declarationText: string): { leanStatement: string; leanProof?: string } {

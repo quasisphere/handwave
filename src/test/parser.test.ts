@@ -72,6 +72,27 @@ test("parses Handwave Lean doc comments and declarations", () => {
   assert.equal(declarations[0].leanProof, "by\n  exact Nat.add_assoc a b c");
 });
 
+test("parses namespace-qualified Lean declaration names", () => {
+  const declarations = parseLeanDocument(`namespace RelWP
+
+namespace HyperbolicMetric
+
+/--
+%%handwave
+statement:
+  A named theorem in a nested namespace.
+-/
+theorem sample_theorem : True := by
+  trivial
+
+end HyperbolicMetric
+
+end RelWP
+`, "/workspace/Namespaced.lean");
+
+  assert.equal(declarations[0].name, "RelWP.HyperbolicMetric.sample_theorem");
+});
+
 test("parses Handwave definitions", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
   const definition = declarations.find((declaration) => declaration.name === "double");

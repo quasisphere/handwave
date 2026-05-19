@@ -1,6 +1,7 @@
 import {
   ArticleDocument,
   Backlink,
+  LeanDeclarationCheckStatus,
   LeanDeclaration,
   ParsedTarget,
   ResolvedTarget
@@ -12,19 +13,25 @@ export class HandwaveIndex {
   readonly articles = new Map<string, ArticleDocument>();
   readonly articleKeys = new Map<string, string>();
   readonly backlinks = new Map<string, Backlink[]>();
+  readonly workspaceRoots: string[];
+  private readonly checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus>;
 
   constructor(
-    readonly workspaceRoot: string,
+    workspaceRoots: string | string[],
     declarations: LeanDeclaration[],
-    articles: ArticleDocument[]
+    articles: ArticleDocument[],
+    checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus> = new Map()
   ) {
+    this.workspaceRoots = (Array.isArray(workspaceRoots) ? workspaceRoots : [workspaceRoots]).filter(Boolean);
+    this.checkStatuses = checkStatuses;
+
     for (const declaration of declarations) {
       this.leanDeclarations.set(declaration.name, declaration);
     }
 
     for (const article of articles) {
       this.articles.set(article.uri, article);
-      for (const key of articleKeys(article.uri, workspaceRoot)) {
+      for (const key of articleKeys(article.uri, this.workspaceRoots)) {
         this.articleKeys.set(key, article.uri);
       }
       this.collectBacklinks(article);
@@ -64,6 +71,14 @@ export class HandwaveIndex {
 
   targetKey(rawTarget: string): string {
     return canonicalTargetKey(parseTarget(rawTarget));
+  }
+
+  checkStatusForLean(name: string): LeanDeclarationCheckStatus | undefined {
+    return this.checkStatuses.get(name);
+  }
+
+  dependenciesForLean(name: string): string[] {
+    return this.checkStatuses.get(name)?.dependencies ?? [];
   }
 
   private resolveLean(target: ParsedTarget): ResolvedTarget | undefined {
@@ -157,6 +172,7 @@ export class HandwaveIndex {
       this.backlinks.set(key, existing);
     }
   }
+
 }
 
 export function canonicalTargetKey(target: ParsedTarget): string {
@@ -194,22 +210,25 @@ function resolveSelectorText(
   return handwaveDoc?.fields[selector];
 }
 
-function articleKeys(uri: string, workspaceRoot: string): string[] {
+function articleKeys(uri: string, workspaceRoots: string[]): string[] {
   const normalizedUri = uri.replace(/\\/g, "/");
-  const normalizedRoot = workspaceRoot.replace(/\\/g, "/").replace(/\/$/, "");
-  const relative = normalizedUri.startsWith(normalizedRoot)
-    ? stripLeadingSlash(normalizedUri.slice(normalizedRoot.length))
-    : normalizedUri.split("/").slice(-1)[0];
-  const withoutExtension = relative.replace(/\.hw\.md$|\.hw$/i, "");
-  const basename = relative.split("/").slice(-1)[0];
-  const basenameWithoutExtension = basename.replace(/\.hw\.md$|\.hw$/i, "");
+  const roots = workspaceRoots.map((root) => root.replace(/\\/g, "/").replace(/\/$/, ""));
+  const relatives = roots
+    .filter((root) => normalizedUri.startsWith(root))
+    .map((root) => stripLeadingSlash(normalizedUri.slice(root.length)));
+  if (relatives.length === 0) {
+    relatives.push(normalizedUri.split("/").slice(-1)[0]);
+  }
 
-  return Array.from(new Set([
-    relative,
-    withoutExtension,
-    basename,
-    basenameWithoutExtension
-  ]));
+  const basename = normalizedUri.split("/").slice(-1)[0];
+  const basenameWithoutExtension = basename.replace(/\.hw\.md$|\.hw$/i, "");
+  const keys = [normalizedUri, basename, basenameWithoutExtension];
+
+  for (const relative of relatives) {
+    keys.push(relative, relative.replace(/\.hw\.md$|\.hw$/i, ""));
+  }
+
+  return Array.from(new Set(keys));
 }
 
 function stripLeadingSlash(value: string): string {

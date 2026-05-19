@@ -21,6 +21,7 @@ const supportedSelectors = [
 export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] {
   const declarations: LeanDeclaration[] = [];
   const comments = collectDocComments(text);
+  const searchableText = blankLeanCommentsAndStrings(text);
 
   for (const comment of comments) {
     if (!comment.text.includes("%%handwave")) {
@@ -28,7 +29,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     }
 
     const doc = parseHandwaveDoc(comment.text, comment.range, text);
-    const afterComment = text.slice(comment.end);
+    const afterComment = searchableText.slice(comment.end);
     declarationPattern.lastIndex = 0;
     const match = declarationPattern.exec(afterComment);
     if (!match) {
@@ -42,7 +43,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const declStart = comment.end + match.index;
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
-    const statementEnd = findDeclarationStatementEnd(text, declStart);
+    const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
     const declarationText = text.slice(declStart, statementEnd).trim();
     const parts = splitLeanDeclaration(declarationText);
     declarations.push({
@@ -59,7 +60,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
   }
 
   declarationPattern.lastIndex = 0;
-  for (const match of text.matchAll(declarationPattern)) {
+  for (const match of searchableText.matchAll(declarationPattern)) {
     const declStart = match.index ?? 0;
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
@@ -67,7 +68,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
       continue;
     }
 
-    const statementEnd = findDeclarationStatementEnd(text, declStart);
+    const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
     const declarationText = text.slice(declStart, statementEnd).trim();
     const parts = splitLeanDeclaration(declarationText);
     declarations.push({
@@ -264,14 +265,81 @@ function parseHandwaveDoc(comment: string, range: RangeLike, sourceText: string)
   return { fields: rest, range, errors };
 }
 
-function findDeclarationStatementEnd(text: string, start: number): number {
-  const nextBlank = text.indexOf("\n\n", start);
+function findDeclarationStatementEnd(text: string, searchableText: string, start: number): number {
   const nextDoc = text.indexOf("\n/--", start + 1);
-  const candidates = [nextBlank, nextDoc].filter((index) => index > start);
+  declarationPattern.lastIndex = start + 1;
+  const nextDeclaration = declarationPattern.exec(searchableText)?.index ?? -1;
+  const candidates = [nextDoc, nextDeclaration].filter((index) => index > start);
   if (candidates.length === 0) {
     return text.length;
   }
   return Math.min(...candidates);
+}
+
+function blankLeanCommentsAndStrings(source: string): string {
+  let result = "";
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("--", index)) {
+      const nextNewline = source.indexOf("\n", index + 2);
+      const end = nextNewline >= 0 ? nextNewline : source.length;
+      result += " ".repeat(end - index);
+      index = end;
+      continue;
+    }
+
+    if (source.startsWith("/-", index)) {
+      const end = findBlockCommentEnd(source, index + 2);
+      result += " ".repeat(end - index);
+      index = end;
+      continue;
+    }
+
+    if (source[index] === "\"") {
+      const end = findStringEnd(source, index + 1);
+      result += " ".repeat(end - index);
+      index = end;
+      continue;
+    }
+
+    result += source[index];
+    index += 1;
+  }
+  return result;
+}
+
+function findBlockCommentEnd(source: string, start: number): number {
+  let depth = 1;
+  let index = start;
+  while (index < source.length && depth > 0) {
+    if (source.startsWith("/-", index)) {
+      depth += 1;
+      index += 2;
+      continue;
+    }
+    if (source.startsWith("-/", index)) {
+      depth -= 1;
+      index += 2;
+      continue;
+    }
+    index += 1;
+  }
+  return index;
+}
+
+function findStringEnd(source: string, start: number): number {
+  let index = start;
+  while (index < source.length) {
+    if (source[index] === "\\") {
+      index += 2;
+      continue;
+    }
+    if (source[index] === "\"") {
+      return index + 1;
+    }
+    index += 1;
+  }
+  return source.length;
 }
 
 function splitSelector(body: string): { base: string; selector?: string } {

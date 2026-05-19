@@ -31,6 +31,14 @@ export interface LeanDeclaration {
   uri: string;
 }
 
+export interface LeanDeclarationCheckStatus {
+  checked: boolean;
+  ownChecked: boolean;
+  dependencies: string[];
+  failedDependencies: string[];
+  reason: string;
+}
+
 export interface ArticleAnchor {
   id: string;
   title: string;

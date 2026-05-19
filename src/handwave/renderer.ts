@@ -6,23 +6,27 @@ export function renderArticleHtml(
   text: string,
   uri: string,
   index: HandwaveIndex,
-  commandHref: (target: string) => string
+  commandHref: (target: string) => string,
+  options: { indexing?: boolean } = {}
 ): string {
   const withIncludes = text.replace(/@include\{([^}\s]+)\}/g, (_match, target: string) => {
     const parsedTarget = parseTarget(target);
     if (parsedTarget.kind === "lean" && !parsedTarget.selector) {
       const declaration = index.leanDeclarations.get(parsedTarget.base);
       if (declaration) {
-        return renderDeclarationPackage(declaration, target, commandHref);
+        return renderDeclarationPackage(declaration, target, commandHref, index);
       }
     }
 
     const resolved = index.resolve(target, uri);
     if (!resolved) {
+      if (options.indexing) {
+        return `<div class="include include-pending"><span class="include-status" aria-hidden="true">…</span> Loading include: <code>${escapeHtml(target)}</code></div>`;
+      }
       return `<div class="include unresolved">Unresolved include: <code>${escapeHtml(target)}</code></div>`;
     }
 
-    const preview = renderInlineMarkdown(resolved.preview, commandHref).replace(/\r?\n/g, "<br>");
+    const preview = renderProseParagraphs(resolved.preview, commandHref);
     return `<div class="include" data-target="${escapeHtml(target)}">${preview}</div>`;
   });
 
@@ -43,7 +47,13 @@ export function renderArticleHtml(
       --muted: color-mix(in srgb, currentColor 64%, transparent);
       --accent: #2f6feb;
       --danger: #d1242f;
+      --success: #1a7f37;
       --surface: color-mix(in srgb, currentColor 4%, transparent);
+      --syntax-keyword: var(--vscode-symbolIcon-keywordForeground, #cf222e);
+      --syntax-constant: var(--vscode-symbolIcon-constantForeground, #0550ae);
+      --syntax-comment: var(--vscode-descriptionForeground, #6e7781);
+      --syntax-string: var(--vscode-symbolIcon-stringForeground, #0a7f42);
+      --syntax-operator: var(--vscode-symbolIcon-operatorForeground, #8250df);
     }
     body {
       font-family: var(--vscode-font-family);
@@ -90,8 +100,44 @@ export function renderArticleHtml(
       margin: 0 0 1em;
     }
     .theorem-line,
-    .definition-line {
+    .definition-line,
+    .prose-paragraph {
       margin: 0;
+    }
+    .theorem-line {
+      position: relative;
+    }
+    .check-status {
+      display: inline-block;
+      font-weight: 700;
+      margin-right: 0.35em;
+      min-width: 1em;
+      text-align: center;
+    }
+    .theorem-line .check-status {
+      left: -1.55em;
+      margin-right: 0;
+      position: absolute;
+      top: 0;
+    }
+    .check-status-checked {
+      color: var(--vscode-testing-iconPassed, var(--success));
+    }
+    .check-status-unchecked {
+      color: var(--vscode-testing-iconFailed, var(--danger));
+    }
+    .check-status-pending {
+      animation: check-status-pulse 1.2s ease-in-out infinite;
+      color: var(--muted);
+    }
+    @keyframes check-status-pulse {
+      0%, 100% { opacity: 0.45; }
+      50% { opacity: 1; }
+    }
+    .prose-paragraph + .prose-paragraph,
+    .theorem-line + .prose-paragraph,
+    .definition-line + .prose-paragraph {
+      margin-top: 0.65em;
     }
     .declaration-label {
       display: inline-block;
@@ -183,8 +229,17 @@ export function renderArticleHtml(
     .theorem-view pre,
     .definition-view pre {
       margin: 0;
-      white-space: pre-wrap;
+      tab-size: 2;
+      white-space: pre;
     }
+    .lean-source {
+      display: block;
+    }
+    .lean-keyword { color: var(--syntax-keyword); font-weight: 600; }
+    .lean-constant { color: var(--syntax-constant); }
+    .lean-comment { color: var(--syntax-comment); font-style: italic; }
+    .lean-string { color: var(--syntax-string); }
+    .lean-operator { color: var(--syntax-operator); }
     [data-mode="text"] .lean-content,
     [data-mode="lean"] .prose-content,
     [data-mode="collapsed"] .proof-content {
@@ -205,13 +260,10 @@ export function renderArticleHtml(
       top: -0.05em;
     }
     .proof-body {
-      display: inline;
+      display: block;
     }
     .proof-content {
-      display: inline;
-    }
-    .proof-body .prose-content {
-      display: inline;
+      display: block;
     }
     .proof-body .lean-content {
       margin-top: 0.5em;
@@ -224,6 +276,16 @@ export function renderArticleHtml(
     .unresolved {
       border-color: color-mix(in srgb, var(--danger) 45%, transparent);
       color: var(--vscode-errorForeground, var(--danger));
+    }
+    .include-pending {
+      color: var(--muted);
+    }
+    .include-status {
+      display: inline-block;
+      font-weight: 700;
+      margin-right: 0.35em;
+      min-width: 1em;
+      text-align: center;
     }
     blockquote {
       border-left: 3px solid var(--border);
@@ -356,7 +418,7 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
     }
 
     if (
-      line.startsWith("<div class=\"include\"") ||
+      line.startsWith("<div class=\"include") ||
       line.startsWith("<section class=\"theorem-view\"") ||
       line.startsWith("<section class=\"definition-view\"")
     ) {
@@ -383,13 +445,62 @@ function renderInlineMarkdown(text: string, commandHref: (target: string) => str
   });
 }
 
+function proseParagraphs(text: string): string[] {
+  return text
+    .split(/\r?\n[ \t]*\r?\n/)
+    .map((paragraph) => paragraph.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" "))
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+}
+
+function renderProseParagraphs(text: string, commandHref: (target: string) => string): string {
+  return proseParagraphs(text)
+    .map((paragraph) => `<p class="prose-paragraph">${renderInlineMarkdown(paragraph, commandHref)}</p>`)
+    .join("");
+}
+
+function renderLabeledProseParagraphs(
+  lineClass: string,
+  labelHtml: string,
+  text: string,
+  commandHref: (target: string) => string
+): string {
+  const paragraphs = proseParagraphs(text);
+  if (paragraphs.length === 0) {
+    return `<p class="${escapeHtml(lineClass)}">${labelHtml}</p>`;
+  }
+
+  const [first, ...rest] = paragraphs;
+  return [
+    `<p class="${escapeHtml(lineClass)}">${labelHtml} <span class="prose-content">${renderInlineMarkdown(first, commandHref)}</span></p>`,
+    ...rest.map((paragraph) =>
+      `<p class="prose-paragraph prose-content">${renderInlineMarkdown(paragraph, commandHref)}</p>`
+    )
+  ].join("");
+}
+
+function renderProofParagraphs(text: string, commandHref: (target: string) => string): string {
+  const paragraphs = proseParagraphs(text);
+  if (paragraphs.length === 0) {
+    return `<p class="prose-paragraph"><span class="qed" aria-label="QED">□</span></p>`;
+  }
+
+  return paragraphs
+    .map((paragraph, index) => {
+      const qed = index === paragraphs.length - 1 ? `<span class="qed" aria-label="QED">□</span>` : "";
+      return `<p class="prose-paragraph">${renderInlineMarkdown(paragraph, commandHref)}${qed}</p>`;
+    })
+    .join("");
+}
+
 function renderDeclarationPackage(
   declaration: LeanDeclaration,
   target: string,
-  commandHref: (target: string) => string
+  commandHref: (target: string) => string,
+  index: HandwaveIndex
 ): string {
   if (isTheoremLike(declaration)) {
-    return renderTheoremView(declaration, target, commandHref);
+    return renderTheoremView(declaration, target, commandHref, index);
   }
 
   return renderDefinitionView(declaration, target, commandHref);
@@ -398,7 +509,8 @@ function renderDeclarationPackage(
 function renderTheoremView(
   declaration: LeanDeclaration,
   target: string,
-  commandHref: (target: string) => string
+  commandHref: (target: string) => string,
+  index: HandwaveIndex
 ): string {
   const proseStatement =
     declaration.doc?.fields.statement ??
@@ -406,18 +518,19 @@ function renderTheoremView(
   const proseProof = declaration.doc?.fields.proof ?? "No prose proof has been written yet.";
   const leanProof = declaration.leanProof ?? declaration.statement;
   const label = declarationLabel("Theorem", declaration);
+  const status = index.checkStatusForLean(declaration.name);
 
   return compactHtml(`
     <section class="theorem-view" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        <p class="theorem-line">${renderDeclarationLabel(label, target, commandHref, "Theorem view")} <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
-        <pre class="lean-content"><code>${escapeHtml(declaration.leanStatement)}</code></pre>
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, "Theorem view")}`, proseStatement, commandHref)}
+        ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
         <div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾</button>${renderProofLabel()} <div class="proof-content">
           <div class="proof-body">
-            <span class="prose-content">${renderInlineMarkdown(proseProof, commandHref).replace(/\r?\n/g, "<br>")}<span class="qed" aria-label="QED">□</span></span>
-            <pre class="lean-content"><code>${escapeHtml(leanProof)}</code></pre>
+            <div class="prose-content">${renderProofParagraphs(proseProof, commandHref)}</div>
+            ${renderLeanBlock(leanProof)}
           </div>
         </div></div>
       </div>
@@ -438,8 +551,8 @@ function renderDefinitionView(
   return compactHtml(`
     <section class="definition-view" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="text">
-        <p class="definition-line">${renderDeclarationLabel(label, target, commandHref, "Definition view")} <span class="prose-content">${renderInlineMarkdown(proseStatement, commandHref).replace(/\r?\n/g, "<br>")}</span></p>
-        <pre class="lean-content"><code>${escapeHtml(declaration.statement)}</code></pre>
+        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, "Definition view"), proseStatement, commandHref)}
+        ${renderLeanBlock(declaration.statement)}
       </div>
     </section>
   `);
@@ -473,6 +586,64 @@ function renderProofLabel(): string {
 
 function renderModeControls(ariaLabel: string): string {
   return `<span class="view-switch" role="group" aria-label="${escapeHtml(ariaLabel)}"><button class="mode-control" type="button" data-set-mode="text" aria-pressed="true">text</button><button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button></span>`;
+}
+
+function renderCheckStatus(status: ReturnType<HandwaveIndex["checkStatusForLean"]>): string {
+  if (!status) {
+    return `<span class="check-status check-status-pending" title="Lean status is still being inferred." aria-label="Lean status pending">…</span>`;
+  }
+
+  const mark = status.checked ? "✓" : "✗";
+  const cssClass = status.checked ? "check-status-checked" : "check-status-unchecked";
+  const label = status.checked ? "Lean checked" : "Lean unchecked";
+  return `<span class="check-status ${cssClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
+}
+
+function renderLeanBlock(source: string): string {
+  const highlighted = highlightLean(source).replace(/\r?\n/g, "&#10;");
+  return `<pre class="lean-content"><code class="lean-source">${highlighted}</code></pre>`;
+}
+
+function highlightLean(source: string): string {
+  const tokenPattern =
+    /--[\s\S]*?-\/|\/-[\s\S]*?-\/|--.*|"(?:\\.|[^"\\])*"|`[^`\n]*`|\b(?:abbrev|axiom|by|calc|class|def|deriving|else|end|example|exact|extends|fun|have|if|import|in|inductive|instance|let|lemma|match|namespace|noncomputable|open|opaque|private|protected|public|rfl|simp|structure|theorem|then|universe|variable|where|with)\b|\b(?:Prop|Sort|Type|True|False|Nat|Int|Rat|Real|Complex|Set|Fin)\b|:=|=>|↦|←|→|∀|∃|≤|≥|≠|∧|∨|¬|⟨|⟩|·/g;
+  let html = "";
+  let cursor = 0;
+
+  for (const match of source.matchAll(tokenPattern)) {
+    const token = match[0];
+    const index = match.index ?? 0;
+    html += escapeHtml(source.slice(cursor, index));
+    html += highlightLeanToken(token);
+    cursor = index + token.length;
+  }
+
+  html += escapeHtml(source.slice(cursor));
+  return html;
+}
+
+function highlightLeanToken(token: string): string {
+  if (token.startsWith("--") || token.startsWith("/-")) {
+    return `<span class="lean-comment">${escapeHtml(token)}</span>`;
+  }
+
+  if (token.startsWith("\"")) {
+    return `<span class="lean-string">${escapeHtml(token)}</span>`;
+  }
+
+  if (/^`[^`\n]*`$/.test(token)) {
+    return `<span class="lean-constant">${escapeHtml(token)}</span>`;
+  }
+
+  if (/^(Prop|Sort|Type|True|False|Nat|Int|Rat|Real|Complex|Set|Fin)$/.test(token)) {
+    return `<span class="lean-constant">${escapeHtml(token)}</span>`;
+  }
+
+  if (/^(:=|=>|↦|←|→|∀|∃|≤|≥|≠|∧|∨|¬|⟨|⟩|·)$/.test(token)) {
+    return `<span class="lean-operator">${escapeHtml(token)}</span>`;
+  }
+
+  return `<span class="lean-keyword">${escapeHtml(token)}</span>`;
 }
 
 function slugForHeading(title: string): string {

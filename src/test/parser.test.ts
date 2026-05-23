@@ -240,12 +240,18 @@ test("renders Lean statement includes as theorem views", () => {
   const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
     ["my_add_assoc", leanStatus(true, "Lean LSP diagnostics report no errors.")]
   ]));
-  const html = renderArticleHtml(articleText, "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
+  const html = renderArticleHtml(
+    articleText,
+    "/workspace/natural-numbers.hw.md",
+    index,
+    (target) => `command:${target}`,
+    { editorHref: (target) => `editor:${target}` }
+  );
 
   assert.match(html, /<a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="lean:my_add_assoc">parentheses do not matter<\/a>/);
   assert.match(html, /<strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
   assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
-  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">lean:my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="editor:lean:my_add_assoc" title="Open my_add_assoc in editor">my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
   assert.match(html, /<div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾<\/button><span class="declaration-label"><strong>Proof\.<\/strong>.*<div class="proof-content">/);
   assert.match(html, /Use the standard associativity theorem\.<span class="qed" aria-label="QED">□<\/span>/);
   assert.match(html, /aria-label="Theorem view"/);
@@ -303,6 +309,33 @@ test("renders pending theorem status while Lean status is unavailable", () => {
   assert.match(html, /class="check-status check-status-pending"[^>]*aria-label="Lean status pending">…<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
 });
 
+test("renders stale theorem check status with parenthesized marks", () => {
+  const declarations = parseLeanDocument(proofStatusLeanText, "/workspace/ProofStatus.lean");
+  const articleText = [
+    "@include{lean:checked_theorem}",
+    "@include{lean:unchecked_theorem}",
+    "@include{lean:depends_on_unchecked}"
+  ].join("\n\n");
+  const article = parseArticleDocument(articleText, "/workspace/proof-status.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
+    ["checked_theorem", { ...leanStatus(true, "previously checked"), stale: true, generation: 1 }],
+    ["unchecked_theorem", { ...leanStatus(false, "previously unchecked"), stale: true, generation: 1 }],
+    [
+      "depends_on_unchecked",
+      {
+        ...leanStatus(false, "previously checked with sorry dependencies", ["sorryAx"], ["sorryAx"]),
+        stale: true,
+        generation: 1
+      }
+    ]
+  ]));
+  const html = renderArticleHtml(articleText, "/workspace/proof-status.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /class="check-status check-status-checked check-status-stale"[^>]*aria-label="Lean checked, stale">\(✓\)<\/span>/);
+  assert.match(html, /class="check-status check-status-unchecked check-status-stale"[^>]*aria-label="Lean unchecked, stale">\(✗\)<\/span>/);
+  assert.match(html, /class="check-status check-status-dependency-warning check-status-stale"[^>]*aria-label="Lean checked with unchecked dependencies, stale">\(✓\)<\/span>/);
+});
+
 test("renders unresolved includes as loading while the index is warming up", () => {
   const index = new HandwaveIndex("/workspace", [], []);
   const html = renderArticleHtml(
@@ -332,11 +365,17 @@ test("renders definition includes as definition views", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
   const article = parseArticleDocument("@include{lean:double}", "/workspace/natural-numbers.hw.md");
   const index = new HandwaveIndex("/workspace", declarations, [article]);
-  const html = renderArticleHtml("@include{lean:double}", "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
+  const html = renderArticleHtml(
+    "@include{lean:double}",
+    "/workspace/natural-numbers.hw.md",
+    index,
+    (target) => `command:${target}`,
+    { editorHref: (target) => `editor:${target}` }
+  );
 
   assert.match(html, /class="definition-view"/);
   assert.match(html, /<strong><a class="declaration-link" href="command:lean:double" data-handwave-target="lean:double" title="Open lean:double">Definition \(Double\)\.<\/a><\/strong>/);
-  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Definition view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:double" data-handwave-target="lean:double" title="Open lean:double">lean:double<\/a><button class="copy-control" type="button" data-copy-target="lean:double" title="Copy lean:double" aria-label="Copy lean:double"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Definition view".*<span class="source-popover-separator">\|<\/span><a href="editor:lean:double" title="Open double in editor">double<\/a><button class="copy-control" type="button" data-copy-target="lean:double" title="Copy lean:double" aria-label="Copy lean:double"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
   assert.match(html, /aria-label="Definition view"/);
   assert.match(html, /Doubling a natural number means adding it to itself: \$\\operatorname\{double\}\(n\) = n \+ n\$\./);
   assert.match(html, /<span class="lean-keyword">def<\/span> double \(n : <span class="lean-constant">Nat<\/span>\) : <span class="lean-constant">Nat<\/span> <span class="lean-operator">:=<\/span> n \+ n/);

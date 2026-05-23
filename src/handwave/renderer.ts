@@ -2,19 +2,28 @@ import { HandwaveIndex } from "./index";
 import { parseArticleDocument, parseLeanDocument, parseTarget } from "./parser";
 import { LeanDeclaration } from "./types";
 
+interface RenderOptions {
+  indexing?: boolean;
+  focusId?: string;
+  currentTarget?: string;
+  currentUri?: string;
+  editorHref?: (target: string) => string;
+}
+
 export function renderArticleHtml(
   text: string,
   uri: string,
   index: HandwaveIndex,
   commandHref: (target: string) => string,
-  options: { indexing?: boolean; focusId?: string; currentTarget?: string; currentUri?: string } = {}
+  options: RenderOptions = {}
 ): string {
+  const editorHref = options.editorHref ?? commandHref;
   const withIncludes = text.replace(/@include\{([^}\s]+)\}/g, (_match, target: string) => {
     const parsedTarget = parseTarget(target);
     if (parsedTarget.kind === "lean" && !parsedTarget.selector) {
       const declaration = index.leanDeclarations.get(parsedTarget.base);
       if (declaration) {
-        return renderDeclarationPackage(declaration, target, commandHref, index);
+        return renderDeclarationPackage(declaration, target, commandHref, editorHref, index);
       }
     }
 
@@ -42,8 +51,9 @@ export function renderLeanDocumentHtml(
   uri: string,
   index: HandwaveIndex,
   commandHref: (target: string) => string,
-  options: { focusId?: string; currentTarget?: string; currentUri?: string } = {}
+  options: RenderOptions = {}
 ): string {
+  const editorHref = options.editorHref ?? commandHref;
   const indexedDeclarations = [...index.leanDeclarations.values()]
     .filter((declaration) => declaration.uri === uri)
     .sort((first, second) =>
@@ -58,7 +68,7 @@ export function renderLeanDocumentHtml(
     declarations.length === 0
       ? `<p class="lean-file-empty">No Lean declarations were found in this file.</p>${renderLeanBlock(text)}`
       : declarations.map((declaration) =>
-        renderDeclarationPackage(declaration, `lean:${declaration.name}`, commandHref, index)
+        renderDeclarationPackage(declaration, `lean:${declaration.name}`, commandHref, editorHref, index)
       ).join("\n")
   ].join("\n");
 
@@ -185,6 +195,9 @@ function renderHtmlShell(
     .check-status-pending {
       animation: check-status-pulse 1.2s ease-in-out infinite;
       color: var(--muted);
+    }
+    .check-status-stale {
+      font-weight: 600;
     }
     @keyframes check-status-pulse {
       0%, 100% { opacity: 0.45; }
@@ -718,19 +731,21 @@ function renderDeclarationPackage(
   declaration: LeanDeclaration,
   target: string,
   commandHref: (target: string) => string,
+  editorHref: (target: string) => string,
   index: HandwaveIndex
 ): string {
   if (isTheoremLike(declaration)) {
-    return renderTheoremView(declaration, target, commandHref, index);
+    return renderTheoremView(declaration, target, commandHref, editorHref, index);
   }
 
-  return renderDefinitionView(declaration, target, commandHref);
+  return renderDefinitionView(declaration, target, commandHref, editorHref);
 }
 
 function renderTheoremView(
   declaration: LeanDeclaration,
   target: string,
   commandHref: (target: string) => string,
+  editorHref: (target: string) => string,
   index: HandwaveIndex
 ): string {
   const proseStatement =
@@ -744,7 +759,7 @@ function renderTheoremView(
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, "Theorem view")}`, proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view")}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
@@ -762,7 +777,8 @@ function renderTheoremView(
 function renderDefinitionView(
   declaration: LeanDeclaration,
   target: string,
-  commandHref: (target: string) => string
+  commandHref: (target: string) => string,
+  editorHref: (target: string) => string
 ): string {
   const proseStatement =
     declaration.doc?.fields.statement ??
@@ -772,7 +788,7 @@ function renderDefinitionView(
   return compactHtml(`
     <section class="definition-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, "Definition view"), proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, editorHref, "Definition view"), proseStatement, commandHref)}
         ${renderLeanBlock(declaration.statement)}
       </div>
     </section>
@@ -796,15 +812,23 @@ function renderDeclarationLabel(
   label: string,
   target: string,
   commandHref: (target: string) => string,
+  editorHref: (target: string) => string,
   controlsLabel: string
 ): string {
   const href = escapeHtml(commandHref(target));
+  const editorLinkHref = escapeHtml(editorHref(target));
   const escapedTarget = escapeHtml(target);
-  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${escapedTarget}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span></span></span>`;
+  const sourceLabel = escapeHtml(declarationSourceLabel(target));
+  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span></span></span>`;
 }
 
 function renderProofLabel(): string {
   return `<span class="declaration-label"><strong>Proof.</strong><span class="source-popover"><span class="source-popover-row">${renderModeControls("Proof view")}</span></span></span>`;
+}
+
+function declarationSourceLabel(target: string): string {
+  const parsed = parseTarget(target);
+  return parsed.kind === "lean" ? parsed.base : target;
 }
 
 function renderModeControls(ariaLabel: string): string {
@@ -817,18 +841,21 @@ function renderCheckStatus(status: ReturnType<HandwaveIndex["checkStatusForLean"
   }
 
   const hasDependencyWarning = !status.checked && status.ownChecked;
-  const mark = status.checked || hasDependencyWarning ? "✓" : "✗";
+  const baseMark = status.checked || hasDependencyWarning ? "✓" : "✗";
+  const mark = status.stale ? `(${baseMark})` : baseMark;
   const cssClass = status.checked
     ? "check-status-checked"
     : hasDependencyWarning
       ? "check-status-dependency-warning"
       : "check-status-unchecked";
-  const label = status.checked
+  const staleClass = status.stale ? " check-status-stale" : "";
+  const baseLabel = status.checked
     ? "Lean checked"
     : hasDependencyWarning
       ? "Lean checked with unchecked dependencies"
       : "Lean unchecked";
-  return `<span class="check-status ${cssClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
+  const label = status.stale ? `${baseLabel}, stale` : baseLabel;
+  return `<span class="check-status ${cssClass}${staleClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
 }
 
 function renderLeanBlock(source: string): string {

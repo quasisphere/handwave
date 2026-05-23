@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import { spawn } from "node:child_process";
 import { collectDiagnostics, DiagnosticIssue } from "./handwave/diagnostics";
 import { HandwaveIndex } from "./handwave/index";
@@ -76,6 +77,8 @@ class HandwaveController
   private documentUpdateTimer: NodeJS.Timeout | undefined;
   private diagnosticUpdateTimer: NodeJS.Timeout | undefined;
   private axiomCheckTimer: NodeJS.Timeout | undefined;
+  private compiledLeanChangeTimer: NodeJS.Timeout | undefined;
+  private compiledLeanPollTimer: NodeJS.Timeout | undefined;
   private leanProcessStatusTimer: NodeJS.Timeout | undefined;
   private leanProcessStartedAt: number | undefined;
   private leanProcessStatusLabel: string | undefined;
@@ -83,6 +86,7 @@ class HandwaveController
   private isIndexing = false;
   private isFlushingAxiomChecks = false;
   private leanAxiomCheckGeneration = 0;
+  private compiledLeanArtifactsSnapshot: string | undefined;
   private nextPreviewKey = 1;
 
   readonly onDidChangeCodeLenses = this.codeLensEmitter.event;
@@ -109,9 +113,10 @@ class HandwaveController
       vscode.languages.registerDefinitionProvider(articleSelector, this),
       vscode.languages.registerCodeLensProvider(leanSelector, this),
       vscode.commands.registerCommand("handwave.rebuildIndex", () => {
-        this.invalidateLeanAxiomChecks();
+        this.clearLeanAxiomChecks();
         return this.rebuildIndex(true);
       }),
+      vscode.commands.registerCommand("handwave.refreshLeanStatus", () => this.refreshLeanStatus()),
       vscode.commands.registerCommand("handwave.openArticlePreview", (uri?: vscode.Uri) => this.openArticlePreview(uri)),
       vscode.commands.registerCommand("handwave.previewBack", () => this.navigatePreviewHistory(-1)),
       vscode.commands.registerCommand("handwave.previewForward", () => this.navigatePreviewHistory(1)),
@@ -124,7 +129,7 @@ class HandwaveController
       vscode.workspace.onDidChangeTextDocument((event) => {
         if (isLeanOrArticle(event.document.uri)) {
           if (isLeanUri(event.document.uri)) {
-            this.invalidateLeanAxiomChecksAfterLeanChange();
+            this.markLeanAxiomChecksStale();
           }
           this.scheduleDocumentUpdate(event.document);
         }
@@ -132,13 +137,14 @@ class HandwaveController
       vscode.workspace.onDidSaveTextDocument((document) => {
         if (isLeanOrArticle(document.uri)) {
           if (isLeanUri(document.uri)) {
-            this.invalidateLeanAxiomChecksAfterLeanChange();
+            this.markLeanAxiomChecksStale();
           }
           this.scheduleFullRebuild();
         }
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration("handwave")) {
+          this.clearLeanAxiomChecks();
           void this.rebuildIndex();
         }
       }),
@@ -152,7 +158,7 @@ class HandwaveController
         }
       }),
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
-        this.invalidateLeanAxiomChecks();
+        this.clearLeanAxiomChecks();
         void this.rebuildIndex();
       })
     );
@@ -163,24 +169,27 @@ class HandwaveController
         watcher,
         watcher.onDidCreate((uri) => {
           if (isLeanUri(uri)) {
-            this.invalidateLeanAxiomChecksAfterLeanChange();
+            this.markLeanAxiomChecksStale();
           }
           this.scheduleFullRebuild();
         }),
         watcher.onDidDelete((uri) => {
           if (isLeanUri(uri)) {
-            this.invalidateLeanAxiomChecksAfterLeanChange();
+            this.markLeanAxiomChecksStale();
           }
           this.scheduleFullRebuild();
         }),
         watcher.onDidChange((uri) => {
           if (isLeanUri(uri)) {
-            this.invalidateLeanAxiomChecksAfterLeanChange();
+            this.markLeanAxiomChecksStale();
           }
           this.scheduleFullRebuild();
         })
       );
     }
+
+    this.registerCompiledLeanArtifactWatchers();
+    this.compiledLeanPollTimer = setInterval(() => this.pollCompiledLeanArtifacts(), 3000);
   }
 
   dispose(): void {
@@ -195,6 +204,12 @@ class HandwaveController
     }
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
+    }
+    if (this.compiledLeanChangeTimer) {
+      clearTimeout(this.compiledLeanChangeTimer);
+    }
+    if (this.compiledLeanPollTimer) {
+      clearInterval(this.compiledLeanPollTimer);
     }
     this.clearLeanProcessStatus();
     for (const disposable of this.disposables) {
@@ -243,6 +258,53 @@ class HandwaveController
       void this.refreshPreviews();
       void this.triggerLeanDiagnosticsForOpenPreviews();
     }, 500);
+  }
+
+  private scheduleCompiledLeanStatusRefresh(): void {
+    if (this.compiledLeanChangeTimer) {
+      clearTimeout(this.compiledLeanChangeTimer);
+    }
+    this.compiledLeanChangeTimer = setTimeout(() => {
+      this.compiledLeanChangeTimer = undefined;
+      this.compiledLeanArtifactsSnapshot =
+        this.compiledLeanArtifactSnapshotForOpenPreviews() ?? this.compiledLeanArtifactsSnapshot;
+      this.markLeanAxiomChecksStale();
+      void this.triggerLeanDiagnosticsForOpenPreviews();
+    }, 750);
+  }
+
+  private registerCompiledLeanArtifactWatchers(): void {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const patterns = [".lake/build/lib/lean/**/*.olean", ".lake/build/lib/lean/**/*.ilean"];
+    for (const folder of workspaceFolders) {
+      for (const pattern of patterns) {
+        const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, pattern));
+        this.disposables.push(
+          watcher,
+          watcher.onDidCreate(() => this.scheduleCompiledLeanStatusRefresh()),
+          watcher.onDidChange(() => this.scheduleCompiledLeanStatusRefresh()),
+          watcher.onDidDelete(() => this.scheduleCompiledLeanStatusRefresh())
+        );
+      }
+    }
+  }
+
+  private pollCompiledLeanArtifacts(): void {
+    const snapshot = this.compiledLeanArtifactSnapshotForOpenPreviews();
+    if (!snapshot) {
+      this.compiledLeanArtifactsSnapshot = undefined;
+      return;
+    }
+
+    if (this.compiledLeanArtifactsSnapshot === undefined) {
+      this.compiledLeanArtifactsSnapshot = snapshot;
+      return;
+    }
+
+    if (snapshot !== this.compiledLeanArtifactsSnapshot) {
+      this.compiledLeanArtifactsSnapshot = snapshot;
+      this.scheduleCompiledLeanStatusRefresh();
+    }
   }
 
   async rebuildIndex(showNotification = false): Promise<void> {
@@ -337,7 +399,7 @@ class HandwaveController
     }
   }
 
-  private invalidateLeanAxiomChecks(): void {
+  private clearLeanAxiomChecks(): void {
     this.leanAxiomCheckGeneration++;
     this.leanAxiomCheckStatuses.clear();
     this.leanAxiomChecksRequested.clear();
@@ -348,11 +410,23 @@ class HandwaveController
     }
   }
 
-  private invalidateLeanAxiomChecksAfterLeanChange(): void {
-    // A Lean edit can change the transitive axiom footprint of declarations in
-    // other files. Without a dependency graph, per-file invalidation leaves
-    // stale red/green badges for theorems whose dependencies changed elsewhere.
-    this.invalidateLeanAxiomChecks();
+  private markLeanAxiomChecksStale(): void {
+    // A Lean source or compiled-artifact change can alter the transitive axiom
+    // footprint of declarations in other files. Keep the latest known answers
+    // visible, but make them stale and allow fresh probes to be queued.
+    this.leanAxiomCheckGeneration++;
+    this.leanAxiomChecksRequested.clear();
+    this.leanAxiomCheckQueue.clear();
+    if (this.axiomCheckTimer) {
+      clearTimeout(this.axiomCheckTimer);
+      this.axiomCheckTimer = undefined;
+    }
+    this.refreshLeanStatusViews();
+  }
+
+  private async refreshLeanStatus(): Promise<void> {
+    this.markLeanAxiomChecksStale();
+    await this.triggerLeanDiagnosticsForOpenPreviews();
   }
 
   private pruneLeanAxiomChecks(declarations: readonly LeanDeclaration[]): void {
@@ -422,7 +496,13 @@ class HandwaveController
     }
     for (const [name, axiomStatus] of this.leanAxiomCheckStatuses) {
       const diagnosticStatus = statuses.get(name);
-      statuses.set(name, mergeLeanCheckStatuses(diagnosticStatus, axiomStatus));
+      statuses.set(
+        name,
+        mergeLeanCheckStatuses(
+          diagnosticStatus,
+          withLeanCheckStaleness(axiomStatus, this.leanAxiomCheckGeneration)
+        )
+      );
     }
     return statuses;
   }
@@ -644,7 +724,7 @@ class HandwaveController
         if (!this.isCurrentAxiomRequest(request)) {
           continue;
         }
-        changed = this.leanAxiomCheckStatuses.delete(request.declaration.name) || changed;
+        changed = this.releaseLeanAxiomRequest(request, { allowRetry: true }) || changed;
       }
       return changed;
     }
@@ -658,7 +738,7 @@ class HandwaveController
       }
       const axioms = axiomsByName.get(name);
       if (!axioms) {
-        changed = this.leanAxiomCheckStatuses.delete(name) || changed;
+        changed = this.releaseLeanAxiomRequest(request, { allowRetry: true }) || changed;
         continue;
       }
 
@@ -668,6 +748,8 @@ class HandwaveController
         ownChecked: true,
         dependencies: axioms,
         failedDependencies: hasSorry ? ["sorryAx"] : [],
+        stale: false,
+        generation: this.leanAxiomCheckGeneration,
         reason: hasSorry
           ? "Lean checks this declaration, but a transitive dependency still depends on sorryAx."
           : "Lean axiom check reports no transitive dependency on sorryAx."
@@ -679,6 +761,17 @@ class HandwaveController
       changed = changed || !leanCheckStatusesEqual(previous, nextStatus);
     }
     return changed;
+  }
+
+  private releaseLeanAxiomRequest(
+    request: LeanAxiomCheckRequest,
+    options: { allowRetry?: boolean } = {}
+  ): boolean {
+    if (!this.isCurrentAxiomRequest(request)) {
+      return false;
+    }
+
+    return options.allowRetry ? this.leanAxiomChecksRequested.delete(request.declaration.name) : false;
   }
 
   private clearLeanAxiomRequest(
@@ -902,6 +995,8 @@ class HandwaveController
       const text = await readWorkspaceText(state.uri);
       const commandHref = (target: string) =>
         commandUriString("handwave.openPreviewTarget", target, state.uri.fsPath, state.key);
+      const editorHref = (target: string) =>
+        commandUriString("handwave.openTarget", target, state.uri.fsPath);
       const focusId = options.focus ? state.focusId : undefined;
       state.panel.title = `Handwave: ${state.uri.path.split("/").pop() ?? "Preview"}`;
       const applyHtml = async (html: string) => {
@@ -929,7 +1024,8 @@ class HandwaveController
           {
             focusId,
             currentTarget: state.target,
-            currentUri: state.uri.fsPath
+            currentUri: state.uri.fsPath,
+            editorHref
           }
         ));
         return;
@@ -943,7 +1039,8 @@ class HandwaveController
           indexing: this.isIndexing,
           focusId,
           currentTarget: state.target,
-          currentUri: state.uri.fsPath
+          currentUri: state.uri.fsPath,
+          editorHref
         }
       ));
     } catch {
@@ -1133,28 +1230,81 @@ class HandwaveController
   }
 
   private async triggerLeanDiagnosticsForPreview(state: HandwavePreviewState): Promise<void> {
-    if (isArticleUri(state.uri)) {
-      const article = this.articles.find((item) => item.uri === state.uri.fsPath);
-      if (article) {
-        await this.triggerLeanDiagnosticsForIncludedTheorems([article]);
-      }
+    const declarations = this.theoremDeclarationsForPreviewState(state);
+    if (declarations.length === 0) {
       return;
     }
+    await this.triggerLeanDiagnosticsForDeclarations(
+      declarations,
+      {
+        jobKey: `${isArticleUri(state.uri) ? "article" : "lean"}:${state.uri.fsPath}`,
+        jobLabel: vscode.workspace.asRelativePath(state.uri.fsPath, false)
+      }
+    );
+  }
 
-    if (isLeanUri(state.uri)) {
-      const target = state.target ? parseTarget(state.target) : undefined;
-      await this.triggerLeanDiagnosticsForDeclarations(
-        this.declarations.filter((declaration) =>
-          declaration.uri === state.uri.fsPath &&
-          isTheoremLikeDeclaration(declaration) &&
-          (!target || target.kind !== "lean" || declaration.name === target.base)
-        ),
-        {
-          jobKey: `lean:${state.uri.fsPath}`,
-          jobLabel: vscode.workspace.asRelativePath(state.uri.fsPath, false)
+  private theoremDeclarationsForPreviewState(state: HandwavePreviewState): LeanDeclaration[] {
+    if (isArticleUri(state.uri)) {
+      const article = this.articles.find((item) => item.uri === state.uri.fsPath);
+      if (!article) {
+        return [];
+      }
+
+      const declarations = new Map<string, LeanDeclaration>();
+      for (const include of article.includes) {
+        const resolved = this.index.resolve(include.target, article.uri);
+        if (!resolved) {
+          continue;
         }
-      );
+
+        const declaration = this.index.leanDeclarations.get(resolved.title);
+        if (declaration && isTheoremLikeDeclaration(declaration)) {
+          declarations.set(declaration.name, declaration);
+        }
+      }
+      return [...declarations.values()];
     }
+
+    if (!isLeanUri(state.uri)) {
+      return [];
+    }
+
+    const target = state.target ? parseTarget(state.target) : undefined;
+    return this.declarations.filter((declaration) =>
+      declaration.uri === state.uri.fsPath &&
+      isTheoremLikeDeclaration(declaration) &&
+      (!target || target.kind !== "lean" || declaration.name === target.base)
+    );
+  }
+
+  private compiledLeanArtifactSnapshotForOpenPreviews(): string | undefined {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    if (workspaceFolders.length === 0 || this.previewPanels.size === 0) {
+      return undefined;
+    }
+
+    const declarations = new Map<string, LeanDeclaration>();
+    for (const state of this.previewPanels.values()) {
+      for (const declaration of this.theoremDeclarationsForPreviewState(state)) {
+        declarations.set(declaration.name, declaration);
+      }
+    }
+    if (declarations.size === 0) {
+      return undefined;
+    }
+
+    return [...declarations.values()]
+      .flatMap((declaration) => leanCompiledArtifactPaths(declaration.uri, workspaceFolders))
+      .sort()
+      .map((artifactPath) => {
+        try {
+          const stat = fs.statSync(artifactPath);
+          return `${artifactPath}:${stat.mtimeMs}:${stat.size}`;
+        } catch {
+          return `${artifactPath}:missing`;
+        }
+      })
+      .join("\n");
   }
 
   private async showBacklinks(rawTarget?: string): Promise<void> {
@@ -1345,6 +1495,24 @@ function mergeLeanCheckStatuses(
   return axiomStatus;
 }
 
+function withLeanCheckStaleness(
+  status: LeanDeclarationCheckStatus,
+  currentGeneration: number
+): LeanDeclarationCheckStatus {
+  const stale = status.generation !== undefined && status.generation !== currentGeneration;
+  if (status.stale === stale) {
+    return status;
+  }
+
+  return {
+    ...status,
+    stale,
+    reason: stale
+      ? `${status.reason} This is the latest known status, but it predates the current Lean source or build state.`
+      : status.reason.replace(/\s+This is the latest known status, but it predates the current Lean source or build state\.$/, "")
+  };
+}
+
 function isTheoremLikeDeclaration(declaration: LeanDeclaration): boolean {
   return declaration.kind === "theorem" || declaration.kind === "lemma";
 }
@@ -1451,6 +1619,29 @@ function leanModuleNameForFile(fsPath: string, root: string): string | undefined
   return withoutExtension.split(/[\\/]+/).filter(Boolean).join(".");
 }
 
+function leanCompiledArtifactPaths(
+  fsPath: string,
+  workspaceFolders: readonly vscode.WorkspaceFolder[]
+): string[] {
+  const root = workspaceRootForFile(fsPath, workspaceFolders);
+  if (!root) {
+    return [];
+  }
+
+  const relative = path.relative(root, fsPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative) || !relative.endsWith(".lean")) {
+    return [];
+  }
+
+  const withoutExtension = relative.slice(0, -".lean".length);
+  if (!withoutExtension) {
+    return [];
+  }
+
+  const artifactBase = path.join(root, ".lake", "build", "lib", "lean", ...withoutExtension.split(/[\\/]+/));
+  return [`${artifactBase}.olean`, `${artifactBase}.ilean`];
+}
+
 function leanAxiomDefaultJobKey(requests: readonly LeanAxiomCheckRequest[]): string {
   const uris = [...new Set(requests.map((request) => request.declaration.uri))].sort();
   return `declarations:${uris.join("\0")}`;
@@ -1541,7 +1732,9 @@ function leanCheckStatusesEqual(
     first!.ownChecked === second.ownChecked &&
     stringArraysEqual(first!.dependencies, second.dependencies) &&
     stringArraysEqual(first!.failedDependencies, second.failedDependencies) &&
-    first!.reason === second.reason;
+    first!.reason === second.reason &&
+    first!.stale === second.stale &&
+    first!.generation === second.generation;
 }
 
 function stringArraysEqual(first: readonly string[], second: readonly string[]): boolean {

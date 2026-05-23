@@ -37,6 +37,8 @@ export interface LeanDeclarationCheckStatus {
   dependencies: string[];
   failedDependencies: string[];
   reason: string;
+  stale?: boolean;
+  generation?: number;
 }
 
 export interface ArticleAnchor {

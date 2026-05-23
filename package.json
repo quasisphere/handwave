@@ -25,6 +25,10 @@
         "title": "Handwave: Rebuild Index"
       },
       {
+        "command": "handwave.refreshLeanStatus",
+        "title": "Handwave: Refresh Lean Status"
+      },
+      {
         "command": "handwave.openArticlePreview",
         "title": "Handwave: Open Preview"
       },

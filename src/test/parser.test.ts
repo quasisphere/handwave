@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { HandwaveIndex } from "../handwave/index";
 import { parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
-import { renderArticleHtml } from "../handwave/renderer";
+import { renderArticleHtml, renderLeanDocumentHtml } from "../handwave/renderer";
 
 const leanText = `/--
 %%handwave
@@ -242,9 +242,10 @@ test("renders Lean statement includes as theorem views", () => {
   ]));
   const html = renderArticleHtml(articleText, "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
 
-  assert.match(html, /<strong>Theorem \(Addition associativity\)\.<\/strong>/);
-  assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong>Theorem \(Addition associativity\)\.<\/strong>/);
-  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:my_add_assoc" title="Open lean:my_add_assoc">lean:my_add_assoc<\/a>/);
+  assert.match(html, /<a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="lean:my_add_assoc">parentheses do not matter<\/a>/);
+  assert.match(html, /<strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
+  assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">lean:my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
   assert.match(html, /<div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾<\/button><span class="declaration-label"><strong>Proof\.<\/strong>.*<div class="proof-content">/);
   assert.match(html, /Use the standard associativity theorem\.<span class="qed" aria-label="QED">□<\/span>/);
   assert.match(html, /aria-label="Theorem view"/);
@@ -287,9 +288,9 @@ test("renders theorem check status supplied by Lean diagnostics", () => {
   assert.equal(index.checkStatusForLean("unchecked_theorem")?.checked, false);
   assert.equal(index.checkStatusForLean("depends_on_unchecked")?.checked, false);
   assert.deepEqual(index.checkStatusForLean("depends_on_unchecked")?.failedDependencies, ["unchecked_theorem"]);
-  assert.match(html, /aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong>Theorem\.<\/strong>/);
-  assert.match(html, /title="declaration uses 'sorry'" aria-label="Lean unchecked">✗<\/span><span class="declaration-label"><strong>Theorem\.<\/strong>/);
-  assert.match(html, /title="Unchecked dependencies: unchecked_theorem\." aria-label="Lean unchecked">✗<\/span><span class="declaration-label"><strong>Theorem\.<\/strong>/);
+  assert.match(html, /aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
+  assert.match(html, /title="declaration uses 'sorry'" aria-label="Lean unchecked">✗<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
+  assert.match(html, /title="Unchecked dependencies: unchecked_theorem\." aria-label="Lean checked with unchecked dependencies">✓<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
 });
 
 test("renders pending theorem status while Lean status is unavailable", () => {
@@ -299,7 +300,7 @@ test("renders pending theorem status while Lean status is unavailable", () => {
   const index = new HandwaveIndex("/workspace", declarations, [article]);
   const html = renderArticleHtml(articleText, "/workspace/unnamed.hw.md", index, (target) => `command:${target}`);
 
-  assert.match(html, /class="check-status check-status-pending"[^>]*aria-label="Lean status pending">…<\/span><span class="declaration-label"><strong>Theorem\.<\/strong>/);
+  assert.match(html, /class="check-status check-status-pending"[^>]*aria-label="Lean status pending">…<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
 });
 
 test("renders unresolved includes as loading while the index is warming up", () => {
@@ -334,8 +335,8 @@ test("renders definition includes as definition views", () => {
   const html = renderArticleHtml("@include{lean:double}", "/workspace/natural-numbers.hw.md", index, (target) => `command:${target}`);
 
   assert.match(html, /class="definition-view"/);
-  assert.match(html, /<strong>Definition \(Double\)\.<\/strong>/);
-  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Definition view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:double" title="Open lean:double">lean:double<\/a>/);
+  assert.match(html, /<strong><a class="declaration-link" href="command:lean:double" data-handwave-target="lean:double" title="Open lean:double">Definition \(Double\)\.<\/a><\/strong>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Definition view".*<span class="source-popover-separator">\|<\/span><a href="command:lean:double" data-handwave-target="lean:double" title="Open lean:double">lean:double<\/a><button class="copy-control" type="button" data-copy-target="lean:double" title="Copy lean:double" aria-label="Copy lean:double"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
   assert.match(html, /aria-label="Definition view"/);
   assert.match(html, /Doubling a natural number means adding it to itself: \$\\operatorname\{double\}\(n\) = n \+ n\$\./);
   assert.match(html, /<span class="lean-keyword">def<\/span> double \(n : <span class="lean-constant">Nat<\/span>\) : <span class="lean-constant">Nat<\/span> <span class="lean-operator">:=<\/span> n \+ n/);
@@ -381,8 +382,28 @@ test("renders unnamed theorem and definition labels plainly", () => {
   const index = new HandwaveIndex("/workspace", declarations, [article]);
   const html = renderArticleHtml(articleText, "/workspace/unnamed.hw.md", index, (target) => `command:${target}`);
 
-  assert.match(html, /<strong>Theorem\.<\/strong>/);
-  assert.match(html, /<strong>Definition\.<\/strong>/);
+  assert.match(html, /<strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
+  assert.match(html, /<strong><a class="declaration-link"[^>]*>Definition\.<\/a><\/strong>/);
   assert.doesNotMatch(html, /Theorem \(/);
   assert.doesNotMatch(html, /Definition \(/);
+});
+
+test("renders Lean files as navigable declaration previews", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  const html = renderLeanDocumentHtml(
+    leanText,
+    "/workspace/Nat.lean",
+    index,
+    (target) => `command:${target}`,
+    { focusId: "lean-my_add_assoc" }
+  );
+
+  assert.match(html, /<h1>Nat\.lean<\/h1>/);
+  assert.match(html, /<main id="handwave-content">/);
+  assert.match(html, /class="lean-file-path">\/workspace\/Nat\.lean<\/p>/);
+  assert.match(html, /<section class="theorem-view" id="lean-my_add_assoc" data-target="lean:my_add_assoc">/);
+  assert.match(html, /<section class="definition-view" id="lean-double" data-target="lean:double">/);
+  assert.match(html, /focusHandwaveTarget\("lean-my_add_assoc"\)/);
+  assert.match(html, /message\.type !== "replaceContent"/);
 });

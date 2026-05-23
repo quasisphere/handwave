@@ -5,7 +5,9 @@ Handwave articles and Lean declarations as one lightweight semantic graph.
 
 The extension indexes ordinary `.lean` files and provisional Handwave article
 files (`.hw.md` and `.hw`), validates links and transclusions, and renders
-article previews in a read-only webview.
+articles and Lean files in a read-only webview.  Lean files are shown as a
+sequence of theorem and definition views using the same rendering as article
+includes.
 
 ## Development
 
@@ -15,5 +17,5 @@ npm run compile
 npm test
 ```
 
-Use `Handwave: Rebuild Index`, `Handwave: Open Article Preview`, and
+Use `Handwave: Rebuild Index`, `Handwave: Open Preview`, and
 `Handwave: Show Backlinks` from the VS Code command palette.

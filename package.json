@@ -26,13 +26,39 @@
       },
       {
         "command": "handwave.openArticlePreview",
-        "title": "Handwave: Open Article Preview"
+        "title": "Handwave: Open Preview"
+      },
+      {
+        "command": "handwave.previewBack",
+        "title": "Handwave: Back",
+        "icon": "$(arrow-left)",
+        "enablement": "handwave.previewCanGoBack"
+      },
+      {
+        "command": "handwave.previewForward",
+        "title": "Handwave: Forward",
+        "icon": "$(arrow-right)",
+        "enablement": "handwave.previewCanGoForward"
       },
       {
         "command": "handwave.showBacklinks",
         "title": "Handwave: Show Backlinks"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "handwave.previewBack",
+          "when": "activeWebviewPanelId == 'handwave.articlePreview'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "handwave.previewForward",
+          "when": "activeWebviewPanelId == 'handwave.articlePreview'",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "Handwave",
       "properties": {
@@ -57,10 +83,32 @@
           ],
           "description": "Glob patterns for Lean files indexed by Handwave."
         },
+        "handwave.excludeGlob": {
+          "type": "string",
+          "default": "**/{node_modules,out,.git,.jj,.lake}/**",
+          "description": "Glob pattern excluded when Handwave indexes articles and Lean files."
+        },
         "handwave.enableDiagnostics": {
           "type": "boolean",
           "default": true,
           "description": "Enable diagnostics for unresolved Handwave links, includes, and malformed doc blocks."
+        },
+        "handwave.enableLeanDependencyChecks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Lean axiom probes to decide whether theorem dependencies transitively depend on sorryAx. When disabled, Handwave only uses Lean LSP diagnostics for theorem badges."
+        },
+        "handwave.leanDependencyCheckDelayMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 0,
+          "description": "Delay before running Lean dependency checks after a theorem has clean Lean LSP diagnostics."
+        },
+        "handwave.leanDependencyCheckTimeoutMs": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 1000,
+          "description": "Timeout for each Handwave Lean dependency-check process."
         }
       }
     },

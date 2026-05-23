@@ -1,5 +1,5 @@
 import { HandwaveIndex } from "./index";
-import { parseArticleDocument, parseTarget } from "./parser";
+import { parseArticleDocument, parseLeanDocument, parseTarget } from "./parser";
 import { LeanDeclaration } from "./types";
 
 export function renderArticleHtml(
@@ -7,7 +7,7 @@ export function renderArticleHtml(
   uri: string,
   index: HandwaveIndex,
   commandHref: (target: string) => string,
-  options: { indexing?: boolean } = {}
+  options: { indexing?: boolean; focusId?: string; currentTarget?: string; currentUri?: string } = {}
 ): string {
   const withIncludes = text.replace(/@include\{([^}\s]+)\}/g, (_match, target: string) => {
     const parsedTarget = parseTarget(target);
@@ -34,6 +34,50 @@ export function renderArticleHtml(
   const article = parseArticleDocument(text, uri);
   const title = article.anchors[0]?.title ?? "Handwave Article";
 
+  return renderHtmlShell(title, body, options);
+}
+
+export function renderLeanDocumentHtml(
+  text: string,
+  uri: string,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string,
+  options: { focusId?: string; currentTarget?: string; currentUri?: string } = {}
+): string {
+  const indexedDeclarations = [...index.leanDeclarations.values()]
+    .filter((declaration) => declaration.uri === uri)
+    .sort((first, second) =>
+      first.range.start.line - second.range.start.line ||
+      first.range.start.character - second.range.start.character
+    );
+  const declarations = indexedDeclarations.length > 0 ? indexedDeclarations : parseLeanDocument(text, uri);
+  const title = uri.split(/[\\/]/).pop() ?? "Lean file";
+  const body = [
+    `<h1>${escapeHtml(title)}</h1>`,
+    `<p class="lean-file-path">${escapeHtml(uri)}</p>`,
+    declarations.length === 0
+      ? `<p class="lean-file-empty">No Lean declarations were found in this file.</p>${renderLeanBlock(text)}`
+      : declarations.map((declaration) =>
+        renderDeclarationPackage(declaration, `lean:${declaration.name}`, commandHref, index)
+      ).join("\n")
+  ].join("\n");
+
+  return renderHtmlShell(title, body, options);
+}
+
+export function leanDeclarationAnchorId(name: string): string {
+  return `lean-${name.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
+
+function renderHtmlShell(
+  title: string,
+  body: string,
+  options: { focusId?: string; currentTarget?: string; currentUri?: string } = {}
+): string {
+  const focusScript = options.focusId
+    ? `focusHandwaveTarget(${JSON.stringify(options.focusId)});`
+    : "";
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -48,6 +92,7 @@ export function renderArticleHtml(
       --accent: #2f6feb;
       --danger: #d1242f;
       --success: #1a7f37;
+      --warning: var(--vscode-editorWarning-foreground, #9a6700);
       --surface: color-mix(in srgb, currentColor 4%, transparent);
       --syntax-keyword: var(--vscode-symbolIcon-keywordForeground, #cf222e);
       --syntax-constant: var(--vscode-symbolIcon-constantForeground, #0550ae);
@@ -74,6 +119,14 @@ export function renderArticleHtml(
       color: var(--vscode-textLink-foreground, var(--accent));
       text-decoration-thickness: 1px;
       text-underline-offset: 3px;
+    }
+    .declaration-link {
+      color: inherit;
+      text-decoration: none;
+    }
+    .declaration-link:hover {
+      color: var(--vscode-textLink-foreground, var(--accent));
+      text-decoration: underline;
     }
     code, pre {
       font-family: var(--vscode-editor-font-family);
@@ -126,6 +179,9 @@ export function renderArticleHtml(
     .check-status-unchecked {
       color: var(--vscode-testing-iconFailed, var(--danger));
     }
+    .check-status-dependency-warning {
+      color: var(--warning);
+    }
     .check-status-pending {
       animation: check-status-pulse 1.2s ease-in-out infinite;
       color: var(--muted);
@@ -168,6 +224,62 @@ export function renderArticleHtml(
       font-family: var(--vscode-editor-font-family);
       font-size: 0.9em;
       white-space: nowrap;
+    }
+    .source-popover-row {
+      align-items: center;
+      display: inline-flex;
+    }
+    .copy-control {
+      align-items: center;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--vscode-button-secondaryForeground, currentColor);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      height: 1.55em;
+      justify-content: center;
+      margin-left: 6px;
+      padding: 0;
+      width: 1.55em;
+    }
+    .copy-control:hover {
+      background: var(--vscode-button-secondaryHoverBackground, var(--surface));
+    }
+    .copy-icon {
+      display: inline-block;
+      height: 0.82em;
+      position: relative;
+      width: 0.82em;
+    }
+    .copy-icon::before,
+    .copy-icon::after {
+      border: 1.4px solid currentColor;
+      border-radius: 2px;
+      box-sizing: border-box;
+      content: "";
+      height: 0.62em;
+      position: absolute;
+      width: 0.52em;
+    }
+    .copy-icon::before {
+      left: 0.08em;
+      top: 0.18em;
+    }
+    .copy-icon::after {
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+      left: 0.22em;
+      top: 0.02em;
+    }
+    .sr-only {
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      height: 1px;
+      overflow: hidden;
+      position: absolute;
+      white-space: nowrap;
+      width: 1px;
     }
     .source-popover-row + .source-popover-row {
       border-top: 1px solid var(--border);
@@ -234,6 +346,22 @@ export function renderArticleHtml(
     }
     .lean-source {
       display: block;
+    }
+    .lean-file-path {
+      color: var(--muted);
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+      margin-top: -0.6em;
+    }
+    .lean-file-empty {
+      color: var(--muted);
+    }
+    .focused-target {
+      animation: focus-flash 1.6s ease-out 1;
+    }
+    @keyframes focus-flash {
+      0% { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+      100% { background: transparent; }
     }
     .lean-keyword { color: var(--syntax-keyword); font-weight: 600; }
     .lean-constant { color: var(--syntax-constant); }
@@ -314,10 +442,94 @@ export function renderArticleHtml(
   <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 </head>
 <body>
+<main id="handwave-content">
 ${body}
+</main>
 <script>
+  const handwaveVscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : undefined;
+
+  function focusHandwaveTarget(focusId) {
+    if (!focusId) {
+      return;
+    }
+
+    const focus = document.getElementById(focusId);
+    if (focus) {
+      focus.scrollIntoView({ block: "start" });
+      focus.classList.add("focused-target");
+    }
+  }
+
+  window.addEventListener("load", () => {
+    ${focusScript}
+  });
+
   document.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-set-mode]");
+    const target = event.target instanceof Element ? event.target : undefined;
+    const link = target?.closest("a[data-handwave-target]");
+    if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+
+    event.preventDefault();
+    const handwaveTarget = link.dataset.handwaveTarget;
+    if (!handwaveTarget) {
+      return;
+    }
+
+    handwaveVscode?.postMessage({ type: "navigate", target: handwaveTarget });
+  });
+
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : undefined;
+    const button = target?.closest("[data-copy-target]");
+    if (!button) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const text = button.dataset.copyTarget || "";
+    if (handwaveVscode) {
+      handwaveVscode.postMessage({ type: "copy", text });
+    } else if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => undefined);
+    }
+    const previousLabel = button.getAttribute("aria-label") || "Copy";
+    const previousTitle = button.getAttribute("title") || previousLabel;
+    button.setAttribute("aria-label", "Copied");
+    button.setAttribute("title", "Copied");
+    window.setTimeout(() => {
+      button.setAttribute("aria-label", previousLabel);
+      button.setAttribute("title", previousTitle);
+    }, 900);
+  });
+
+  window.addEventListener("message", (event) => {
+    const message = event.data || {};
+    if (message.type !== "replaceContent" || typeof message.html !== "string") {
+      return;
+    }
+
+    const parser = new DOMParser();
+    const nextDocument = parser.parseFromString(message.html, "text/html");
+    const nextContent = nextDocument.getElementById("handwave-content");
+    const content = document.getElementById("handwave-content");
+    if (!nextContent || !content) {
+      return;
+    }
+
+    content.innerHTML = nextContent.innerHTML;
+    if (nextDocument.title) {
+      document.title = nextDocument.title;
+    }
+    focusHandwaveTarget(typeof message.focusId === "string" ? message.focusId : null);
+    window.MathJax?.typesetPromise?.([content]).catch(() => undefined);
+  });
+
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : undefined;
+    const button = target?.closest("[data-set-mode]");
     if (!button) {
       return;
     }
@@ -343,7 +555,8 @@ ${body}
   });
 
   document.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-toggle-collapsed]");
+    const target = event.target instanceof Element ? event.target : undefined;
+    const button = target?.closest("[data-toggle-collapsed]");
     if (!button) {
       return;
     }
@@ -441,8 +654,16 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
 function renderInlineMarkdown(text: string, commandHref: (target: string) => string): string {
   const escaped = escapeHtml(text);
   return escaped.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label: string, target: string) => {
-    return `<a href="${escapeHtml(commandHref(target))}" title="${escapeHtml(target)}">${label}</a>`;
+    const navigationAttribute = isPreviewNavigableTarget(target)
+      ? ` data-handwave-target="${escapeHtml(target)}"`
+      : "";
+    return `<a href="${escapeHtml(commandHref(target))}"${navigationAttribute} title="${escapeHtml(target)}">${label}</a>`;
   });
+}
+
+function isPreviewNavigableTarget(target: string): boolean {
+  const parsed = parseTarget(target);
+  return parsed.kind === "lean" || parsed.kind === "article" || parsed.kind === "local";
 }
 
 function proseParagraphs(text: string): string[] {
@@ -521,7 +742,7 @@ function renderTheoremView(
   const status = index.checkStatusForLean(declaration.name);
 
   return compactHtml(`
-    <section class="theorem-view" data-target="${escapeHtml(target)}">
+    <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
         ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, "Theorem view")}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
@@ -549,7 +770,7 @@ function renderDefinitionView(
   const label = declarationLabel("Definition", declaration);
 
   return compactHtml(`
-    <section class="definition-view" data-target="${escapeHtml(target)}">
+    <section class="definition-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="text">
         ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, "Definition view"), proseStatement, commandHref)}
         ${renderLeanBlock(declaration.statement)}
@@ -577,7 +798,9 @@ function renderDeclarationLabel(
   commandHref: (target: string) => string,
   controlsLabel: string
 ): string {
-  return `<span class="declaration-label"><strong>${label}</strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${escapeHtml(commandHref(target))}" title="Open ${escapeHtml(target)}">${escapeHtml(target)}</a></span></span></span>`;
+  const href = escapeHtml(commandHref(target));
+  const escapedTarget = escapeHtml(target);
+  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${escapedTarget}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span></span></span>`;
 }
 
 function renderProofLabel(): string {
@@ -593,9 +816,18 @@ function renderCheckStatus(status: ReturnType<HandwaveIndex["checkStatusForLean"
     return `<span class="check-status check-status-pending" title="Lean status is still being inferred." aria-label="Lean status pending">…</span>`;
   }
 
-  const mark = status.checked ? "✓" : "✗";
-  const cssClass = status.checked ? "check-status-checked" : "check-status-unchecked";
-  const label = status.checked ? "Lean checked" : "Lean unchecked";
+  const hasDependencyWarning = !status.checked && status.ownChecked;
+  const mark = status.checked || hasDependencyWarning ? "✓" : "✗";
+  const cssClass = status.checked
+    ? "check-status-checked"
+    : hasDependencyWarning
+      ? "check-status-dependency-warning"
+      : "check-status-unchecked";
+  const label = status.checked
+    ? "Lean checked"
+    : hasDependencyWarning
+      ? "Lean checked with unchecked dependencies"
+      : "Lean unchecked";
   return `<span class="check-status ${cssClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
 }
 

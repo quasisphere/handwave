@@ -276,7 +276,7 @@ function findDeclarationStatementEnd(text: string, searchableText: string, start
   return Math.min(...candidates);
 }
 
-function blankLeanCommentsAndStrings(source: string): string {
+export function blankLeanCommentsAndStrings(source: string): string {
   let result = "";
   let index = 0;
   while (index < source.length) {

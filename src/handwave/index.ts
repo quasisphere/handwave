@@ -6,7 +6,7 @@ import {
   ParsedTarget,
   ResolvedTarget
 } from "./types";
-import { isSupportedSelector, parseTarget } from "./parser";
+import { blankLeanCommentsAndStrings, isSupportedSelector, parseTarget } from "./parser";
 
 export class HandwaveIndex {
   readonly leanDeclarations = new Map<string, LeanDeclaration>();
@@ -14,6 +14,7 @@ export class HandwaveIndex {
   readonly articleKeys = new Map<string, string>();
   readonly backlinks = new Map<string, Backlink[]>();
   readonly workspaceRoots: string[];
+  private readonly leanDependencyGraph: ReadonlyMap<string, string[]>;
   private readonly checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus>;
 
   constructor(
@@ -28,6 +29,7 @@ export class HandwaveIndex {
     for (const declaration of declarations) {
       this.leanDeclarations.set(declaration.name, declaration);
     }
+    this.leanDependencyGraph = collectLeanDependencyGraph(declarations);
 
     for (const article of articles) {
       this.articles.set(article.uri, article);
@@ -78,7 +80,27 @@ export class HandwaveIndex {
   }
 
   dependenciesForLean(name: string): string[] {
-    return this.checkStatuses.get(name)?.dependencies ?? [];
+    const dependencies = [...(this.leanDependencyGraph.get(name) ?? [])];
+    const seen = new Set(dependencies);
+    const status = this.checkStatuses.get(name);
+    if (!status) {
+      return dependencies;
+    }
+
+    for (const dependency of [...status.dependencies, ...status.failedDependencies]) {
+      const declaration = this.leanDeclarations.get(dependency);
+      if (
+        !declaration ||
+        !isTheoremLikeDeclaration(declaration) ||
+        dependency === name ||
+        seen.has(dependency)
+      ) {
+        continue;
+      }
+      dependencies.push(dependency);
+      seen.add(dependency);
+    }
+    return dependencies;
   }
 
   private resolveLean(target: ParsedTarget): ResolvedTarget | undefined {
@@ -229,6 +251,65 @@ function articleKeys(uri: string, workspaceRoots: string[]): string[] {
   }
 
   return Array.from(new Set(keys));
+}
+
+function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): Map<string, string[]> {
+  const theoremDeclarations = declarations.filter(isTheoremLikeDeclaration);
+  const aliases = leanDependencyAliases(theoremDeclarations);
+  const graph = new Map<string, string[]>();
+  const identifierPattern = /[A-Za-z_][A-Za-z0-9_'.]*/g;
+
+  for (const declaration of theoremDeclarations) {
+    const dependencies: string[] = [];
+    const seen = new Set<string>();
+    const source = blankLeanCommentsAndStrings(declaration.statement);
+    for (const match of source.matchAll(identifierPattern)) {
+      const dependency = aliases.get(match[0]);
+      if (!dependency || dependency === declaration.name || seen.has(dependency)) {
+        continue;
+      }
+      dependencies.push(dependency);
+      seen.add(dependency);
+    }
+    graph.set(declaration.name, dependencies);
+  }
+
+  return graph;
+}
+
+function leanDependencyAliases(declarations: readonly LeanDeclaration[]): Map<string, string> {
+  const aliasNames = new Map<string, Set<string>>();
+  for (const declaration of declarations) {
+    for (const alias of leanNameSuffixes(declaration.name)) {
+      let names = aliasNames.get(alias);
+      if (!names) {
+        names = new Set<string>();
+        aliasNames.set(alias, names);
+      }
+      names.add(declaration.name);
+    }
+  }
+
+  const aliases = new Map<string, string>();
+  for (const [alias, names] of aliasNames) {
+    if (names.size === 1) {
+      aliases.set(alias, [...names][0]!);
+    }
+  }
+  return aliases;
+}
+
+function leanNameSuffixes(name: string): string[] {
+  const parts = name.split(".").filter(Boolean);
+  if (parts.length === 0) {
+    return [name];
+  }
+
+  return parts.map((_part, index) => parts.slice(index).join("."));
+}
+
+function isTheoremLikeDeclaration(declaration: LeanDeclaration): boolean {
+  return declaration.kind === "theorem" || declaration.kind === "lemma";
 }
 
 function stripLeadingSlash(value: string): string {

@@ -10,6 +10,15 @@ interface RenderOptions {
   editorHref?: (target: string) => string;
 }
 
+type LeanCheckStatus = ReturnType<HandwaveIndex["checkStatusForLean"]>;
+
+interface DependencyTreeNode {
+  name: string;
+  status: LeanCheckStatus;
+  children: DependencyTreeNode[];
+  cycle: boolean;
+}
+
 export function renderArticleHtml(
   text: string,
   uri: string,
@@ -177,7 +186,7 @@ function renderHtmlShell(
       min-width: 1em;
       text-align: center;
     }
-    .theorem-line .check-status {
+    .theorem-line > .check-status {
       left: -1.55em;
       margin-right: 0;
       position: absolute;
@@ -191,6 +200,9 @@ function renderHtmlShell(
     }
     .check-status-dependency-warning {
       color: var(--warning);
+    }
+    .check-status-inconclusive {
+      color: var(--muted);
     }
     .check-status-pending {
       animation: check-status-pulse 1.2s ease-in-out infinite;
@@ -217,12 +229,15 @@ function renderHtmlShell(
       border: 1px solid var(--vscode-editorHoverWidget-border, var(--border));
       border-radius: 6px;
       box-shadow: 0 6px 18px color-mix(in srgb, black 18%, transparent);
+      box-sizing: border-box;
       display: none;
       left: 0;
-      min-width: max-content;
+      max-width: min(560px, calc(100vw - 32px));
+      min-width: min(18em, calc(100vw - 32px));
       padding: 6px 8px;
       position: absolute;
       top: calc(100% + 2px);
+      width: max-content;
       z-index: 10;
     }
     .source-popover::before {
@@ -234,13 +249,60 @@ function renderHtmlShell(
       top: -8px;
     }
     .source-popover a {
+      display: inline-block;
       font-family: var(--vscode-editor-font-family);
       font-size: 0.9em;
+      max-width: 48ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: bottom;
       white-space: nowrap;
     }
     .source-popover-row {
       align-items: center;
       display: inline-flex;
+      max-width: 100%;
+    }
+    .dependency-tree {
+      border-top: 1px solid var(--border);
+      display: block;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+      margin-top: 6px;
+      max-height: min(45vh, 360px);
+      min-width: 18em;
+      overflow: auto;
+      padding-top: 6px;
+    }
+    .dependency-tree-list {
+      display: block;
+      list-style: none;
+      margin: 0;
+      padding-left: 0;
+    }
+    .dependency-tree-list .dependency-tree-list {
+      border-left: 1px solid var(--border);
+      margin-left: 0.62em;
+      padding-left: 0.95em;
+    }
+    .dependency-tree-item + .dependency-tree-item {
+      margin-top: 4px;
+    }
+    .dependency-tree-item {
+      display: block;
+    }
+    .dependency-node {
+      align-items: center;
+      display: flex;
+      min-width: 0;
+      white-space: nowrap;
+    }
+    .dependency-tree .check-status {
+      flex: 0 0 auto;
+      margin-right: 0.45em;
+    }
+    .dependency-link {
+      max-width: 48ch;
     }
     .copy-control {
       align-items: center;
@@ -755,11 +817,12 @@ function renderTheoremView(
   const leanProof = declaration.leanProof ?? declaration.statement;
   const label = declarationLabel("Theorem", declaration);
   const status = index.checkStatusForLean(declaration.name);
+  const dependencyTree = renderDependencyTree(declaration.name, index, commandHref);
 
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view")}`, proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree)}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
@@ -813,17 +876,104 @@ function renderDeclarationLabel(
   target: string,
   commandHref: (target: string) => string,
   editorHref: (target: string) => string,
-  controlsLabel: string
+  controlsLabel: string,
+  popoverBodyHtml = ""
 ): string {
   const href = escapeHtml(commandHref(target));
   const editorLinkHref = escapeHtml(editorHref(target));
   const escapedTarget = escapeHtml(target);
   const sourceLabel = escapeHtml(declarationSourceLabel(target));
-  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span></span></span>`;
+  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
 }
 
 function renderProofLabel(): string {
   return `<span class="declaration-label"><strong>Proof.</strong><span class="source-popover"><span class="source-popover-row">${renderModeControls("Proof view")}</span></span></span>`;
+}
+
+function renderDependencyTree(
+  name: string,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string
+): string {
+  const nodes = dependencyTreeNodes(name, index, new Set([name]));
+  if (nodes.length === 0) {
+    return "";
+  }
+
+  return `<span class="dependency-tree" role="tree" aria-label="Dependency tree">${renderDependencyList(nodes, commandHref, index)}</span>`;
+}
+
+function dependencyTreeNodes(
+  name: string,
+  index: HandwaveIndex,
+  path: ReadonlySet<string>
+): DependencyTreeNode[] {
+  return index.dependenciesForLean(name).map((dependencyName) => {
+    const status = index.checkStatusForLean(dependencyName);
+    const cycle = path.has(dependencyName);
+    const nextPath = new Set(path);
+    nextPath.add(dependencyName);
+    return {
+      name: dependencyName,
+      status,
+      cycle,
+      children: !cycle && shouldExpandDependency(status)
+        ? dependencyTreeNodes(dependencyName, index, nextPath)
+        : []
+    };
+  });
+}
+
+function renderDependencyList(
+  nodes: readonly DependencyTreeNode[],
+  commandHref: (target: string) => string,
+  index: HandwaveIndex
+): string {
+  return `<span class="dependency-tree-list" role="group">${nodes.map((node) => renderDependencyNode(node, commandHref, index)).join("")}</span>`;
+}
+
+function renderDependencyNode(
+  node: DependencyTreeNode,
+  commandHref: (target: string) => string,
+  index: HandwaveIndex
+): string {
+  const target = `lean:${node.name}`;
+  const href = escapeHtml(commandHref(target));
+  const escapedTarget = escapeHtml(target);
+  const escapedName = escapeHtml(node.name);
+  const escapedLabel = escapeHtml(dependencyDisplayName(node.name, index));
+  const statusKind = dependencyStatusKind(node.status);
+  const children = node.children.length > 0 ? renderDependencyList(node.children, commandHref, index) : "";
+  const cycleAttribute = node.cycle ? ` data-dependency-cycle="true"` : "";
+  return `<span class="dependency-tree-item dependency-tree-${statusKind}" role="treeitem" data-dependency-name="${escapedName}" data-dependency-status="${statusKind}"${cycleAttribute}><span class="dependency-node">${renderCheckStatus(node.status)}<a class="dependency-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${escapedLabel}</a></span>${children}</span>`;
+}
+
+function dependencyDisplayName(name: string, index: HandwaveIndex): string {
+  return index.leanDeclarations.get(name)?.doc?.fields.name?.trim() || shortLeanName(name);
+}
+
+function shortLeanName(name: string): string {
+  return name.split(".").filter(Boolean).pop() ?? name;
+}
+
+function shouldExpandDependency(status: LeanCheckStatus): boolean {
+  return Boolean(status && !status.checked);
+}
+
+function dependencyStatusKind(status: LeanCheckStatus): string {
+  if (!status) {
+    return "pending";
+  }
+  if (status.inconclusive) {
+    return "inconclusive";
+  }
+  if (status.checked) {
+    return "checked";
+  }
+  if (status.ownChecked) {
+    return "dependency-warning";
+  }
+  return "unchecked";
 }
 
 function declarationSourceLabel(target: string): string {
@@ -835,9 +985,16 @@ function renderModeControls(ariaLabel: string): string {
   return `<span class="view-switch" role="group" aria-label="${escapeHtml(ariaLabel)}"><button class="mode-control" type="button" data-set-mode="text" aria-pressed="true">text</button><button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button></span>`;
 }
 
-function renderCheckStatus(status: ReturnType<HandwaveIndex["checkStatusForLean"]>): string {
+function renderCheckStatus(status: LeanCheckStatus): string {
   if (!status) {
     return `<span class="check-status check-status-pending" title="Lean status is still being inferred." aria-label="Lean status pending">…</span>`;
+  }
+
+  if (status.inconclusive) {
+    const mark = status.stale ? "(?)" : "?";
+    const staleClass = status.stale ? " check-status-stale" : "";
+    const label = status.stale ? "Lean status unavailable, stale" : "Lean status unavailable";
+    return `<span class="check-status check-status-inconclusive${staleClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
   }
 
   const hasDependencyWarning = !status.checked && status.ownChecked;

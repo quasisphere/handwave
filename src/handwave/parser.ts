@@ -41,6 +41,9 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     }
 
     const declStart = comment.end + match.index;
+    if (isPrivateLeanDeclarationAt(text, declStart)) {
+      continue;
+    }
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
     const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
@@ -62,6 +65,9 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
   declarationPattern.lastIndex = 0;
   for (const match of searchableText.matchAll(declarationPattern)) {
     const declStart = match.index ?? 0;
+    if (isPrivateLeanDeclarationAt(text, declStart)) {
+      continue;
+    }
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
     const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
     if (declarations.some((decl) => decl.name === name)) {
@@ -207,6 +213,11 @@ function collectDocComments(text: string): Array<{ text: string; start: number; 
   }
 
   return comments;
+}
+
+function isPrivateLeanDeclarationAt(text: string, declarationOffset: number): boolean {
+  const lineStart = text.lastIndexOf("\n", Math.max(0, declarationOffset - 1)) + 1;
+  return /\bprivate\b/.test(text.slice(lineStart, declarationOffset));
 }
 
 function parseHandwaveDoc(comment: string, range: RangeLike, sourceText: string): HandwaveDoc {

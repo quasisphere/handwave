@@ -37,6 +37,7 @@ export interface LeanDeclarationCheckStatus {
   dependencies: string[];
   failedDependencies: string[];
   reason: string;
+  inconclusive?: boolean;
   stale?: boolean;
   generation?: number;
 }

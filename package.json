@@ -113,6 +113,12 @@
           "default": 300000,
           "minimum": 1000,
           "description": "Timeout for each Handwave Lean dependency-check process."
+        },
+        "handwave.leanDependencyCheckBatchSize": {
+          "type": "number",
+          "default": 16,
+          "minimum": 1,
+          "description": "Maximum number of declarations to check in one Handwave Lean dependency-check process."
         }
       }
     },

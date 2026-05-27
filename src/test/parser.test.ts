@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { HandwaveIndex } from "../handwave/index";
+import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import { parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
 import { renderArticleHtml, renderLeanDocumentHtml } from "../handwave/renderer";
@@ -80,6 +81,64 @@ statement:
 -/
 theorem depends_on_unchecked : True := by
   exact unchecked_theorem
+`;
+
+const dependencyTreeLeanText = `namespace DependencyTree
+
+/--
+%%handwave
+name:
+  Complete dependency
+statement:
+  This dependency is complete.
+-/
+theorem green_dep : True := by
+  trivial
+
+/--
+%%handwave
+name:
+  Incomplete dependency
+statement:
+  This dependency is incomplete.
+-/
+theorem red_dep : True := by
+  sorry
+
+/--
+%%handwave
+statement:
+  This dependency is proved, but it relies on an incomplete theorem.
+-/
+theorem yellow_dep : True := by
+  exact red_dep
+
+/--
+%%handwave
+statement:
+  This theorem depends on both a complete theorem and a theorem with incomplete dependencies.
+-/
+theorem root_dep : True := by
+  have _ := green_dep
+  exact yellow_dep
+
+end DependencyTree
+`;
+
+const privateDependencyLeanText = `namespace PrivateDependency
+
+private theorem hidden_dep : True := by
+  trivial
+
+/--
+%%handwave
+statement:
+  This theorem uses a private implementation lemma.
+-/
+theorem public_dep : True := by
+  exact hidden_dep
+
+end PrivateDependency
 `;
 
 function leanStatus(
@@ -299,6 +358,58 @@ test("renders theorem check status supplied by Lean diagnostics", () => {
   assert.match(html, /title="Unchecked dependencies: unchecked_theorem\." aria-label="Lean checked with unchecked dependencies">✓<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
 });
 
+test("renders theorem hover dependency tree with recursive incomplete dependencies", () => {
+  const declarations = parseLeanDocument(dependencyTreeLeanText, "/workspace/DependencyTree.lean");
+  const articleText = "@include{lean:DependencyTree.root_dep}";
+  const article = parseArticleDocument(articleText, "/workspace/dependency-tree.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
+    ["DependencyTree.green_dep", leanStatus(true, "Lean axiom check reports no transitive dependency on sorryAx.")],
+    ["DependencyTree.red_dep", leanStatus(false, "Lean declaration contains a direct `sorry`.")],
+    [
+      "DependencyTree.yellow_dep",
+      leanStatus(
+        false,
+        "Unchecked dependencies: DependencyTree.red_dep.",
+        ["DependencyTree.red_dep"],
+        ["DependencyTree.red_dep"]
+      )
+    ],
+    [
+      "DependencyTree.root_dep",
+      leanStatus(
+        false,
+        "Unchecked dependencies: DependencyTree.yellow_dep.",
+        ["DependencyTree.yellow_dep"],
+        ["DependencyTree.yellow_dep"]
+      )
+    ]
+  ]));
+  const html = renderArticleHtml(articleText, "/workspace/dependency-tree.hw.md", index, (target) => `command:${target}`);
+
+  assert.deepEqual(index.dependenciesForLean("DependencyTree.root_dep"), ["DependencyTree.green_dep", "DependencyTree.yellow_dep"]);
+  assert.deepEqual(index.dependenciesForLean("DependencyTree.yellow_dep"), ["DependencyTree.red_dep"]);
+  assert.match(html, /\.theorem-line > \.check-status \{/);
+  assert.match(html, /<span class="source-popover"><span class="source-popover-row">[\s\S]*<\/span><span class="dependency-tree" role="tree" aria-label="Dependency tree">/);
+  assert.doesNotMatch(html, /<div class="dependency-tree"/);
+  assert.match(html, /data-dependency-name="DependencyTree\.green_dep" data-dependency-status="checked"[\s\S]*aria-label="Lean checked">✓<\/span><a class="dependency-link" href="command:lean:DependencyTree\.green_dep" data-handwave-target="lean:DependencyTree\.green_dep" title="Open lean:DependencyTree\.green_dep">Complete dependency<\/a>/);
+  assert.match(html, /data-dependency-name="DependencyTree\.yellow_dep" data-dependency-status="dependency-warning"[\s\S]*aria-label="Lean checked with unchecked dependencies">✓<\/span><a class="dependency-link" href="command:lean:DependencyTree\.yellow_dep" data-handwave-target="lean:DependencyTree\.yellow_dep" title="Open lean:DependencyTree\.yellow_dep">yellow_dep<\/a>[\s\S]*data-dependency-name="DependencyTree\.red_dep" data-dependency-status="unchecked"[\s\S]*aria-label="Lean unchecked">✗<\/span><a class="dependency-link" href="command:lean:DependencyTree\.red_dep" data-handwave-target="lean:DependencyTree\.red_dep" title="Open lean:DependencyTree\.red_dep">Incomplete dependency<\/a>/);
+
+  const greenIndex = html.indexOf('data-dependency-name="DependencyTree.green_dep"');
+  const yellowIndex = html.indexOf('data-dependency-name="DependencyTree.yellow_dep"');
+  const redIndex = html.indexOf('data-dependency-name="DependencyTree.red_dep"');
+  assert.ok(greenIndex >= 0 && yellowIndex > greenIndex && redIndex > yellowIndex);
+});
+
+test("does not index private Lean declarations as dependency tree nodes", () => {
+  const declarations = parseLeanDocument(privateDependencyLeanText, "/workspace/PrivateDependency.lean");
+  const article = parseArticleDocument("@include{lean:PrivateDependency.public_dep}", "/workspace/private-dependency.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+
+  assert.ok(index.leanDeclarations.has("PrivateDependency.public_dep"));
+  assert.equal(index.leanDeclarations.has("PrivateDependency.hidden_dep"), false);
+  assert.deepEqual(index.dependenciesForLean("PrivateDependency.public_dep"), []);
+});
+
 test("renders pending theorem status while Lean status is unavailable", () => {
   const declarations = parseLeanDocument(unnamedLeanText, "/workspace/Unnamed.lean");
   const articleText = "@include{lean:mul_one_right}";
@@ -307,6 +418,36 @@ test("renders pending theorem status while Lean status is unavailable", () => {
   const html = renderArticleHtml(articleText, "/workspace/unnamed.hw.md", index, (target) => `command:${target}`);
 
   assert.match(html, /class="check-status check-status-pending"[^>]*aria-label="Lean status pending">…<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
+});
+
+test("renders inconclusive theorem status without pending animation", () => {
+  const declarations = parseLeanDocument(unnamedLeanText, "/workspace/Unnamed.lean");
+  const articleText = "@include{lean:mul_one_right}";
+  const article = parseArticleDocument(articleText, "/workspace/unnamed.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
+    ["mul_one_right", {
+      checked: false,
+      ownChecked: false,
+      dependencies: [],
+      failedDependencies: [],
+      inconclusive: true,
+      reason: "Handwave could not finish the Lean dependency check for this declaration."
+    }]
+  ]));
+  const html = renderArticleHtml(articleText, "/workspace/unnamed.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /class="check-status check-status-inconclusive"[^>]*aria-label="Lean status unavailable">\?<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
+  assert.doesNotMatch(html, /aria-label="Lean status pending"/);
+});
+
+test("parses Lean axiom output for declarations with and without axioms", () => {
+  const parsed = parseLeanAxiomOutput([
+    "'clean_theorem' does not depend on any axioms",
+    "'classical_theorem' depends on axioms: [propext, Classical.choice, Quot.sound]"
+  ].join("\n"));
+
+  assert.deepEqual(parsed.get("clean_theorem"), []);
+  assert.deepEqual(parsed.get("classical_theorem"), ["propext", "Classical.choice", "Quot.sound"]);
 });
 
 test("renders stale theorem check status with parenthesized marks", () => {

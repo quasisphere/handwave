@@ -216,6 +216,9 @@ function renderHtmlShell(
     .check-status-inconclusive {
       color: var(--muted);
     }
+    .check-status-blocked {
+      color: var(--warning);
+    }
     .check-status-pending {
       animation: check-status-pulse 1.2s ease-in-out infinite;
       color: var(--muted);
@@ -1038,6 +1041,9 @@ function dependencyStatusKind(status: LeanCheckStatus): string {
   if (status.inconclusive) {
     return "inconclusive";
   }
+  if (status.blocked) {
+    return "blocked";
+  }
   if (status.checked) {
     return "checked";
   }
@@ -1066,6 +1072,13 @@ function renderCheckStatus(status: LeanCheckStatus): string {
     const staleClass = status.stale ? " check-status-stale" : "";
     const label = status.stale ? "Lean status unavailable, stale" : "Lean status unavailable";
     return `<span class="check-status check-status-inconclusive${staleClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
+  }
+
+  if (status.blocked) {
+    const mark = status.stale ? "(!)" : "!";
+    const staleClass = status.stale ? " check-status-stale" : "";
+    const label = status.stale ? "Lean dependency check blocked, stale" : "Lean dependency check blocked";
+    return `<span class="check-status check-status-blocked${staleClass}" title="${escapeHtml(status.reason)}" aria-label="${escapeHtml(label)}">${mark}</span>`;
   }
 
   const hasDependencyWarning = !status.checked && status.ownChecked;

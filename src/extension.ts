@@ -41,6 +41,8 @@ interface LeanAxiomCheckRequest {
   priority: number;
 }
 
+type LeanAxiomCheckQueueItem = LeanAxiomCheckRequest;
+
 interface LeanAxiomCheckJob {
   label: string;
   requests: LeanAxiomCheckRequest[];
@@ -50,6 +52,11 @@ interface PrioritizedLeanDeclaration {
   declaration: LeanDeclaration;
   priority: number;
 }
+
+type LeanAxiomCheckReadiness =
+  | { kind: "ready" }
+  | { kind: "skip" }
+  | { kind: "blocked"; reason: string };
 
 const topLevelPendingPriority = 0;
 const topLevelStalePriority = 1;
@@ -79,7 +86,8 @@ class HandwaveController
   private readonly leanDiagnosticUrisSeen = new Set<string>();
   private readonly leanDiagnosticUrisRequested = new Set<string>();
   private readonly leanAxiomCheckStatuses = new Map<string, LeanDeclarationCheckStatus>();
-  private readonly leanAxiomChecksRequested = new Set<string>();
+  private readonly leanAxiomCheckQueue = new Map<string, LeanAxiomCheckQueueItem>();
+  private readonly leanAxiomChecksRunning = new Set<string>();
   private declarations: LeanDeclaration[] = [];
   private articles: ArticleDocument[] = [];
   private index = new HandwaveIndex("", [], []);
@@ -95,6 +103,7 @@ class HandwaveController
   private leanProcessTimeoutMs: number | undefined;
   private isIndexing = false;
   private isFlushingAxiomChecks = false;
+  private leanAxiomQueueDirty = false;
   private leanAxiomCheckGeneration = 0;
   private compiledLeanArtifactsSnapshot: string | undefined;
   private nextPreviewKey = 1;
@@ -412,7 +421,9 @@ class HandwaveController
   private clearLeanAxiomChecks(): void {
     this.leanAxiomCheckGeneration++;
     this.leanAxiomCheckStatuses.clear();
-    this.leanAxiomChecksRequested.clear();
+    this.leanAxiomCheckQueue.clear();
+    this.leanAxiomChecksRunning.clear();
+    this.leanAxiomQueueDirty = false;
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
       this.axiomCheckTimer = undefined;
@@ -424,12 +435,15 @@ class HandwaveController
     // footprint of declarations in other files. Keep the latest known answers
     // visible, but make them stale and allow fresh probes to be requested.
     this.leanAxiomCheckGeneration++;
-    this.leanAxiomChecksRequested.clear();
+    this.leanAxiomCheckQueue.clear();
+    this.leanAxiomChecksRunning.clear();
+    this.leanAxiomQueueDirty = true;
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
       this.axiomCheckTimer = undefined;
     }
     this.refreshLeanStatusViews();
+    this.refreshLeanAxiomDemandForOpenPreviews();
   }
 
   private async refreshLeanStatus(): Promise<void> {
@@ -445,9 +459,14 @@ class HandwaveController
         this.leanAxiomCheckStatuses.delete(name);
       }
     }
-    for (const name of this.leanAxiomChecksRequested) {
+    for (const name of this.leanAxiomCheckQueue.keys()) {
       if (!names.has(name)) {
-        this.leanAxiomChecksRequested.delete(name);
+        this.leanAxiomCheckQueue.delete(name);
+      }
+    }
+    for (const name of this.leanAxiomChecksRunning) {
+      if (!names.has(name)) {
+        this.leanAxiomChecksRunning.delete(name);
       }
     }
   }
@@ -471,18 +490,6 @@ class HandwaveController
     );
     if (!dependencyChecksEnabled) {
       return statuses;
-    }
-    for (const declaration of declarations) {
-      if (
-        isTheoremLikeDeclaration(declaration) &&
-        this.leanAxiomChecksRequested.has(declaration.name) &&
-        !this.leanAxiomCheckStatuses.has(declaration.name)
-      ) {
-        const diagnosticStatus = statuses.get(declaration.name);
-        if (!diagnosticStatus || diagnosticStatus.checked) {
-          statuses.delete(declaration.name);
-        }
-      }
     }
     for (const [name, axiomStatus] of this.leanAxiomCheckStatuses) {
       const diagnosticStatus = statuses.get(name);
@@ -535,8 +542,8 @@ class HandwaveController
     declarations: readonly LeanDeclaration[]
   ): Promise<void> {
     await this.openLeanDocumentsForDeclarations(declarations);
-    this.scheduleLeanAxiomCheckFlush();
     this.refreshLeanStatusViews();
+    this.refreshLeanAxiomDemandForOpenPreviews();
   }
 
   private async openLeanDocumentsForDeclarations(declarations: readonly LeanDeclaration[]): Promise<void> {
@@ -566,7 +573,124 @@ class HandwaveController
     void this.refreshPreviews();
   }
 
-  private nextLeanAxiomCheckJobForOpenPreviews(
+  private refreshLeanAxiomDemandForOpenPreviews(): void {
+    const statusChanged = this.refreshLeanAxiomQueueForOpenPreviews();
+    if (statusChanged) {
+      this.refreshLeanStatusViews();
+    }
+    if (this.leanAxiomCheckQueue.size > 0) {
+      this.scheduleLeanAxiomCheckFlush();
+    }
+  }
+
+  private refreshLeanAxiomQueueForOpenPreviews(): boolean {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    if (workspaceFolders.length === 0) {
+      this.leanAxiomCheckQueue.clear();
+      return false;
+    }
+    const config = vscode.workspace.getConfiguration("handwave");
+    if (!config.get<boolean>("enableLeanDependencyChecks", true)) {
+      this.leanAxiomCheckQueue.clear();
+      return false;
+    }
+
+    const visible = this.visibleTheoremDeclarationsForOpenPreviews();
+    const visibleNames = new Set(visible.map((item) => item.declaration.name));
+    for (const [name, item] of this.leanAxiomCheckQueue) {
+      if (!visibleNames.has(name) || item.generation !== this.leanAxiomCheckGeneration) {
+        this.leanAxiomCheckQueue.delete(name);
+      }
+    }
+
+    if (visible.length === 0) {
+      return false;
+    }
+
+    let statusChanged = false;
+    const diagnosticStatuses = collectLeanDiagnosticCheckStatuses(
+      visible.map((item) => item.declaration),
+      this.leanDiagnosticUrisSeen
+    );
+
+    for (const { declaration, priority } of visible) {
+      const readiness = this.leanAxiomCheckReadiness(declaration, workspaceFolders, diagnosticStatuses);
+      if (readiness.kind === "skip") {
+        this.leanAxiomCheckQueue.delete(declaration.name);
+        continue;
+      }
+
+      if (readiness.kind === "blocked") {
+        this.leanAxiomCheckQueue.delete(declaration.name);
+        statusChanged = this.recordBlockedLeanAxiomStatus(declaration, readiness.reason) || statusChanged;
+        continue;
+      }
+
+      const previousStatus = this.leanAxiomCheckStatuses.get(declaration.name);
+      if (previousStatus?.blocked) {
+        statusChanged = this.leanAxiomCheckStatuses.delete(declaration.name) || statusChanged;
+      }
+
+      if (!this.leanAxiomChecksRunning.has(declaration.name)) {
+        this.enqueueLeanAxiomCheck({
+          declaration,
+          generation: this.leanAxiomCheckGeneration,
+          priority
+        });
+      }
+    }
+
+    return statusChanged;
+  }
+
+  private leanAxiomCheckReadiness(
+    declaration: LeanDeclaration,
+    workspaceFolders: readonly vscode.WorkspaceFolder[],
+    diagnosticStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus>
+  ): LeanAxiomCheckReadiness {
+    const diagnosticStatus = diagnosticStatuses.get(declaration.name);
+    if (diagnosticStatus && !diagnosticStatus.checked) {
+      return { kind: "skip" };
+    }
+
+    const status = this.index.checkStatusForLean(declaration.name);
+    if (status && !status.stale && !status.blocked) {
+      return { kind: "skip" };
+    }
+
+    if (leanFileHasBlockingDiagnostics(declaration.uri)) {
+      return {
+        kind: "blocked",
+        reason: "Handwave cannot run the Lean dependency check while this Lean file has errors."
+      };
+    }
+
+    if (!leanAxiomProbeTarget(declaration.uri, workspaceFolders)) {
+      return {
+        kind: "blocked",
+        reason: "Handwave cannot run the Lean dependency check because this declaration is not in a Lean module under a workspace root."
+      };
+    }
+
+    return { kind: "ready" };
+  }
+
+  private enqueueLeanAxiomCheck(item: LeanAxiomCheckQueueItem): void {
+    const existing = this.leanAxiomCheckQueue.get(item.declaration.name);
+    if (
+      existing &&
+      existing.generation === item.generation &&
+      existing.declaration.uri === item.declaration.uri &&
+      existing.priority <= item.priority
+    ) {
+      return;
+    }
+
+    this.leanAxiomCheckQueue.set(item.declaration.name, item);
+    this.leanAxiomQueueDirty = true;
+  }
+
+  private nextLeanAxiomCheckJob(
     workspaceFolders: readonly vscode.WorkspaceFolder[]
   ): LeanAxiomCheckJob | undefined {
     if (workspaceFolders.length === 0) {
@@ -577,7 +701,9 @@ class HandwaveController
       return undefined;
     }
 
-    const candidates = this.pendingLeanAxiomDeclarationsForOpenPreviews(workspaceFolders);
+    const candidates = [...this.leanAxiomCheckQueue.values()]
+      .filter((item) => item.generation === this.leanAxiomCheckGeneration)
+      .sort(compareLeanAxiomCheckRequests);
     if (candidates.length === 0) {
       return undefined;
     }
@@ -591,6 +717,11 @@ class HandwaveController
     for (const { declaration, priority } of candidates) {
       const target = leanAxiomProbeTarget(declaration.uri, workspaceFolders);
       if (!target) {
+        this.leanAxiomCheckQueue.delete(declaration.name);
+        this.recordBlockedLeanAxiomStatus(
+          declaration,
+          "Handwave cannot run the Lean dependency check because this declaration is not in a Lean module under a workspace root."
+        );
         continue;
       }
       if (selectedRoot !== undefined && selectedRoot !== target.root) {
@@ -609,7 +740,8 @@ class HandwaveController
       selectedUris.add(declaration.uri);
       selectedHasPrivate = selectedHasPrivate || declaration.isPrivate;
 
-      this.leanAxiomChecksRequested.add(declaration.name);
+      this.leanAxiomCheckQueue.delete(declaration.name);
+      this.leanAxiomChecksRunning.add(declaration.name);
       requests.push({
         declaration,
         generation: this.leanAxiomCheckGeneration,
@@ -632,47 +764,6 @@ class HandwaveController
     };
   }
 
-  private pendingLeanAxiomDeclarationsForOpenPreviews(
-    workspaceFolders: readonly vscode.WorkspaceFolder[]
-  ): PrioritizedLeanDeclaration[] {
-    const visible = this.visibleTheoremDeclarationsForOpenPreviews();
-    if (visible.length === 0) {
-      return [];
-    }
-
-    const diagnosticStatuses = collectLeanDiagnosticCheckStatuses(
-      visible.map((item) => item.declaration),
-      this.leanDiagnosticUrisSeen
-    );
-    return visible
-      .filter(({ declaration }) =>
-        this.needsLeanAxiomCheck(declaration, workspaceFolders, diagnosticStatuses)
-      )
-      .sort(comparePrioritizedLeanDeclarations);
-  }
-
-  private needsLeanAxiomCheck(
-    declaration: LeanDeclaration,
-    workspaceFolders: readonly vscode.WorkspaceFolder[],
-    diagnosticStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus>
-  ): boolean {
-    const status = this.index.checkStatusForLean(declaration.name);
-    if (status && !status.stale) {
-      return false;
-    }
-    if (this.leanAxiomChecksRequested.has(declaration.name)) {
-      return false;
-    }
-    if (leanFileHasBlockingDiagnostics(declaration.uri)) {
-      return false;
-    }
-    const diagnosticStatus = diagnosticStatuses.get(declaration.name);
-    if (diagnosticStatus && !diagnosticStatus.checked) {
-      return false;
-    }
-    return Boolean(leanAxiomProbeTarget(declaration.uri, workspaceFolders));
-  }
-
   private scheduleLeanAxiomCheckFlush(): void {
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
@@ -691,27 +782,35 @@ class HandwaveController
       return;
     }
     if (this.isFlushingAxiomChecks) {
-      return;
-    }
-
-    const job = this.nextLeanAxiomCheckJobForOpenPreviews(workspaceFolders);
-    if (!job) {
+      this.leanAxiomQueueDirty = true;
       return;
     }
 
     this.isFlushingAxiomChecks = true;
-    let jobResult = { changed: false, completedSuccessfully: false };
     try {
-      await this.openLeanDocumentsForDeclarations(job.requests.map((request) => request.declaration));
-      jobResult = await this.runLeanAxiomProbeJob(job, workspaceFolders);
+      while (true) {
+        this.leanAxiomQueueDirty = false;
+        const statusChanged = this.refreshLeanAxiomQueueForOpenPreviews();
+        if (statusChanged) {
+          this.refreshLeanStatusViews();
+        }
+
+        const job = this.nextLeanAxiomCheckJob(workspaceFolders);
+        if (!job) {
+          break;
+        }
+
+        await this.openLeanDocumentsForDeclarations(job.requests.map((request) => request.declaration));
+        const jobChanged = await this.runLeanAxiomProbeJob(job, workspaceFolders);
+        if (jobChanged) {
+          this.refreshLeanStatusViews();
+        }
+      }
     } finally {
       this.isFlushingAxiomChecks = false;
     }
 
-    if (jobResult.changed) {
-      this.refreshLeanStatusViews();
-    }
-    if (jobResult.completedSuccessfully || jobResult.changed) {
+    if (this.leanAxiomQueueDirty || this.leanAxiomCheckQueue.size > 0) {
       this.scheduleLeanAxiomCheckFlush();
     }
   }
@@ -719,17 +818,25 @@ class HandwaveController
   private async runLeanAxiomProbeJob(
     job: LeanAxiomCheckJob,
     workspaceFolders: readonly vscode.WorkspaceFolder[]
-  ): Promise<{ changed: boolean; completedSuccessfully: boolean }> {
+  ): Promise<boolean> {
     const requests = job.requests
       .filter((request) => this.isCurrentAxiomRequest(request))
       .sort(compareLeanAxiomCheckRequests);
     if (requests.length === 0) {
-      return { changed: false, completedSuccessfully: false };
+      return false;
     }
 
     const root = leanAxiomProbeRootForRequests(requests, workspaceFolders);
     if (!root) {
-      return { changed: false, completedSuccessfully: false };
+      let changed = false;
+      for (const request of requests) {
+        changed = this.recordBlockedLeanAxiomStatus(
+          request.declaration,
+          "Handwave cannot run these Lean dependency checks from a single workspace root."
+        ) || changed;
+        this.leanAxiomChecksRunning.delete(request.declaration.name);
+      }
+      return changed;
     }
 
     const config = vscode.workspace.getConfiguration("handwave");
@@ -737,7 +844,6 @@ class HandwaveController
     const batchSize = Math.max(1, Math.floor(config.get<number>("leanDependencyCheckBatchSize", 16)));
     const batches = chunkLeanAxiomRequests(requests, batchSize);
     let changed = false;
-    let completedSuccessfully = false;
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
@@ -746,7 +852,13 @@ class HandwaveController
         input = await leanAxiomProbeInput(root, batch);
       } catch {
         for (const request of batch) {
-          changed = this.releaseLeanAxiomRequest(request) || changed;
+          if (this.isCurrentAxiomRequest(request)) {
+            changed = this.recordBlockedLeanAxiomStatus(
+              request.declaration,
+              "Handwave could not prepare the Lean dependency check for this declaration."
+            ) || changed;
+          }
+          this.leanAxiomChecksRunning.delete(request.declaration.name);
         }
         continue;
       }
@@ -755,42 +867,47 @@ class HandwaveController
       const result = await runLakeLeanStdin(root, input, timeoutMs);
       this.clearLeanProcessStatus();
 
-      completedSuccessfully = result.ok || completedSuccessfully;
       const axiomsByName = parseLeanAxiomOutput(`${result.stdout}\n${result.stderr}`);
       let batchChanged = false;
-      for (const request of batch) {
-        const name = request.declaration.name;
-        if (!this.isCurrentAxiomRequest(request)) {
-          continue;
-        }
-        const axioms = axiomsForDeclaration(axiomsByName, request.declaration);
-        if (!axioms) {
-          batchChanged = this.recordInconclusiveLeanAxiomStatus(
-            request,
-            result.ok
-              ? "The Lean dependency check finished, but did not report an axiom status for this declaration."
-              : "Handwave could not finish the Lean dependency check for this declaration."
-          ) || batchChanged;
-          continue;
-        }
+      try {
+        for (const request of batch) {
+          const name = request.declaration.name;
+          if (!this.isCurrentAxiomRequest(request)) {
+            continue;
+          }
+          const axioms = axiomsForDeclaration(axiomsByName, request.declaration);
+          if (!axioms) {
+            batchChanged = this.recordInconclusiveLeanAxiomStatus(
+              request,
+              result.ok
+                ? "The Lean dependency check finished, but did not report an axiom status for this declaration."
+                : "Handwave could not finish the Lean dependency check for this declaration."
+            ) || batchChanged;
+            continue;
+          }
 
-        const hasSorry = axioms.includes("sorryAx");
-        const nextStatus = {
-          checked: !hasSorry,
-          ownChecked: true,
-          dependencies: axioms,
-          failedDependencies: hasSorry ? ["sorryAx"] : [],
-          stale: false,
-          generation: this.leanAxiomCheckGeneration,
-          reason: hasSorry
-            ? "Lean checks this declaration, but a transitive dependency still depends on sorryAx."
-            : "Lean axiom check reports no transitive dependency on sorryAx."
-        };
-        const previous = this.leanAxiomCheckStatuses.get(name);
-        this.leanAxiomCheckStatuses.set(name, {
-          ...nextStatus
-        });
-        batchChanged = batchChanged || !leanCheckStatusesEqual(previous, nextStatus);
+          const hasSorry = axioms.includes("sorryAx");
+          const nextStatus = {
+            checked: !hasSorry,
+            ownChecked: true,
+            dependencies: axioms,
+            failedDependencies: hasSorry ? ["sorryAx"] : [],
+            stale: false,
+            generation: this.leanAxiomCheckGeneration,
+            reason: hasSorry
+              ? "Lean checks this declaration, but a transitive dependency still depends on sorryAx."
+              : "Lean axiom check reports no transitive dependency on sorryAx."
+          };
+          const previous = this.leanAxiomCheckStatuses.get(name);
+          this.leanAxiomCheckStatuses.set(name, {
+            ...nextStatus
+          });
+          batchChanged = batchChanged || !leanCheckStatusesEqual(previous, nextStatus);
+        }
+      } finally {
+        for (const request of batch) {
+          this.leanAxiomChecksRunning.delete(request.declaration.name);
+        }
       }
 
       if (batchChanged) {
@@ -798,18 +915,7 @@ class HandwaveController
         this.refreshLeanStatusViews();
       }
     }
-    return { changed, completedSuccessfully };
-  }
-
-  private releaseLeanAxiomRequest(
-    request: LeanAxiomCheckRequest,
-    options: { allowRetry?: boolean } = {}
-  ): boolean {
-    if (!this.isCurrentAxiomRequest(request)) {
-      return false;
-    }
-
-    return options.allowRetry ? this.leanAxiomChecksRequested.delete(request.declaration.name) : false;
+    return changed;
   }
 
   private recordInconclusiveLeanAxiomStatus(request: LeanAxiomCheckRequest, reason: string): boolean {
@@ -832,18 +938,20 @@ class HandwaveController
     return !leanCheckStatusesEqual(previous, nextStatus);
   }
 
-  private clearLeanAxiomRequest(
-    request: LeanAxiomCheckRequest,
-    options: { allowRetry?: boolean } = {}
-  ): boolean {
-    if (!this.isCurrentAxiomRequest(request)) {
-      return false;
-    }
-
-    const name = request.declaration.name;
-    const statusChanged = this.leanAxiomCheckStatuses.delete(name);
-    const requestedChanged = options.allowRetry ? this.leanAxiomChecksRequested.delete(name) : false;
-    return statusChanged || requestedChanged;
+  private recordBlockedLeanAxiomStatus(declaration: LeanDeclaration, reason: string): boolean {
+    const nextStatus: LeanDeclarationCheckStatus = {
+      checked: false,
+      ownChecked: false,
+      dependencies: [],
+      failedDependencies: [],
+      blocked: true,
+      stale: false,
+      generation: this.leanAxiomCheckGeneration,
+      reason
+    };
+    const previous = this.leanAxiomCheckStatuses.get(declaration.name);
+    this.leanAxiomCheckStatuses.set(declaration.name, nextStatus);
+    return !leanCheckStatusesEqual(previous, nextStatus);
   }
 
   private beginLeanProcessStatus(label: string, timeoutMs: number): void {
@@ -887,7 +995,7 @@ class HandwaveController
 
   private isCurrentAxiomRequest(request: LeanAxiomCheckRequest): boolean {
     return request.generation === this.leanAxiomCheckGeneration &&
-      this.leanAxiomChecksRequested.has(request.declaration.name);
+      this.leanAxiomChecksRunning.has(request.declaration.name);
   }
 
   private async triggerLeanDiagnosticsForOpenPreviews(): Promise<void> {
@@ -1911,6 +2019,7 @@ function leanCheckStatusesEqual(
     stringArraysEqual(first!.failedDependencies, second.failedDependencies) &&
     first!.reason === second.reason &&
     first!.inconclusive === second.inconclusive &&
+    first!.blocked === second.blocked &&
     first!.stale === second.stale &&
     first!.generation === second.generation;
 }

@@ -529,6 +529,26 @@ test("renders inconclusive theorem status without pending animation", () => {
   assert.doesNotMatch(html, /aria-label="Lean status pending"/);
 });
 
+test("renders blocked theorem status without pending animation", () => {
+  const declarations = parseLeanDocument(unnamedLeanText, "/workspace/Unnamed.lean");
+  const articleText = "@include{lean:mul_one_right}";
+  const article = parseArticleDocument(articleText, "/workspace/unnamed.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
+    ["mul_one_right", {
+      checked: false,
+      ownChecked: false,
+      dependencies: [],
+      failedDependencies: [],
+      blocked: true,
+      reason: "Handwave cannot run the Lean dependency check while this Lean file has errors."
+    }]
+  ]));
+  const html = renderArticleHtml(articleText, "/workspace/unnamed.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /class="check-status check-status-blocked"[^>]*aria-label="Lean dependency check blocked">!<\/span><span class="declaration-label"><strong><a class="declaration-link"[^>]*>Theorem\.<\/a><\/strong>/);
+  assert.doesNotMatch(html, /aria-label="Lean status pending"/);
+});
+
 test("parses Lean axiom output for declarations with and without axioms", () => {
   const parsed = parseLeanAxiomOutput([
     "'clean_theorem' does not depend on any axioms",

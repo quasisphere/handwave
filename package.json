@@ -30,7 +30,11 @@
       },
       {
         "command": "handwave.openArticlePreview",
-        "title": "Handwave: Open Preview"
+        "title": "Handwave: Open Preview",
+        "icon": {
+          "light": "media/handwave.svg",
+          "dark": "media/handwave.svg"
+        }
       },
       {
         "command": "handwave.previewBack",
@@ -51,6 +55,11 @@
     ],
     "menus": {
       "editor/title": [
+        {
+          "command": "handwave.openArticlePreview",
+          "when": "editorLangId == handwave-article || editorLangId == lean || editorLangId == lean4 || resourceExtname == .hw || resourceExtname == .lean || resourceFilename =~ /\\.hw\\.md$/",
+          "group": "navigation@0"
+        },
         {
           "command": "handwave.previewBack",
           "when": "activeWebviewPanelId == 'handwave.articlePreview'",

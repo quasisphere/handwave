@@ -255,16 +255,18 @@ function articleKeys(uri: string, workspaceRoots: string[]): string[] {
 
 function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): Map<string, string[]> {
   const theoremDeclarations = declarations.filter(isTheoremLikeDeclaration);
-  const aliases = leanDependencyAliases(theoremDeclarations);
+  const publicAliases = leanDependencyAliases(theoremDeclarations.filter((declaration) => !declaration.isPrivate));
+  const privateAliasesByUri = leanPrivateDependencyAliasesByUri(theoremDeclarations);
   const graph = new Map<string, string[]>();
   const identifierPattern = /[A-Za-z_][A-Za-z0-9_'.]*/g;
 
   for (const declaration of theoremDeclarations) {
+    const privateAliases = privateAliasesByUri.get(declaration.uri) ?? new Map();
     const dependencies: string[] = [];
     const seen = new Set<string>();
     const source = blankLeanCommentsAndStrings(declaration.statement);
     for (const match of source.matchAll(identifierPattern)) {
-      const dependency = aliases.get(match[0]);
+      const dependency = privateAliases.get(match[0]) ?? publicAliases.get(match[0]);
       if (!dependency || dependency === declaration.name || seen.has(dependency)) {
         continue;
       }
@@ -277,10 +279,26 @@ function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): M
   return graph;
 }
 
+function leanPrivateDependencyAliasesByUri(declarations: readonly LeanDeclaration[]): Map<string, Map<string, string>> {
+  const byUri = new Map<string, LeanDeclaration[]>();
+  for (const declaration of declarations) {
+    if (!declaration.isPrivate) {
+      continue;
+    }
+    byUri.set(declaration.uri, [...(byUri.get(declaration.uri) ?? []), declaration]);
+  }
+
+  const aliases = new Map<string, Map<string, string>>();
+  for (const [uri, uriDeclarations] of byUri) {
+    aliases.set(uri, leanDependencyAliases(uriDeclarations));
+  }
+  return aliases;
+}
+
 function leanDependencyAliases(declarations: readonly LeanDeclaration[]): Map<string, string> {
   const aliasNames = new Map<string, Set<string>>();
   for (const declaration of declarations) {
-    for (const alias of leanNameSuffixes(declaration.name)) {
+    for (const alias of leanNameSuffixes(declaration.sourceName)) {
       let names = aliasNames.get(alias);
       if (!names) {
         names = new Set<string>();

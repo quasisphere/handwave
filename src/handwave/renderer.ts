@@ -64,12 +64,24 @@ export function renderLeanDocumentHtml(
 ): string {
   const editorHref = options.editorHref ?? commandHref;
   const indexedDeclarations = [...index.leanDeclarations.values()]
-    .filter((declaration) => declaration.uri === uri)
+    .filter((declaration) => declaration.uri === uri && !declaration.isPrivate)
     .sort((first, second) =>
       first.range.start.line - second.range.start.line ||
       first.range.start.character - second.range.start.character
     );
-  const declarations = indexedDeclarations.length > 0 ? indexedDeclarations : parseLeanDocument(text, uri);
+  const declarations = indexedDeclarations.length > 0
+    ? indexedDeclarations
+    : parseLeanDocument(text, uri).filter((declaration) => !declaration.isPrivate);
+  const target = options.currentTarget ? parseTarget(options.currentTarget) : undefined;
+  const targetDeclaration = target?.kind === "lean" ? index.leanDeclarations.get(target.base) : undefined;
+  if (
+    targetDeclaration &&
+    targetDeclaration.uri === uri &&
+    isTheoremLike(targetDeclaration)
+  ) {
+    return renderLeanTheoremContextHtml(targetDeclaration, index, commandHref, editorHref, options);
+  }
+
   const title = uri.split(/[\\/]/).pop() ?? "Lean file";
   const body = [
     `<h1>${escapeHtml(title)}</h1>`,
@@ -822,7 +834,7 @@ function renderTheoremView(
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree)}`, proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName)}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
@@ -851,11 +863,68 @@ function renderDefinitionView(
   return compactHtml(`
     <section class="definition-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, editorHref, "Definition view"), proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, editorHref, "Definition view", "", declaration.sourceName), proseStatement, commandHref)}
         ${renderLeanBlock(declaration.statement)}
       </div>
     </section>
   `);
+}
+
+function renderLeanTheoremContextHtml(
+  declaration: LeanDeclaration,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string,
+  editorHref: (target: string) => string,
+  options: RenderOptions
+): string {
+  const declarations = theoremContextDeclarations(declaration, index);
+  const title = declaration.doc?.fields.name?.trim() || shortLeanName(declaration.sourceName);
+  const body = [
+    `<h1>${escapeHtml(title)}</h1>`,
+    `<p class="lean-file-path">${escapeHtml(declaration.uri)}</p>`,
+    declarations.map((item) =>
+      renderDeclarationPackage(item, `lean:${item.name}`, commandHref, editorHref, index)
+    ).join("\n")
+  ].join("\n");
+
+  return renderHtmlShell(title, body, options);
+}
+
+function theoremContextDeclarations(
+  declaration: LeanDeclaration,
+  index: HandwaveIndex
+): LeanDeclaration[] {
+  const dependencyNames = flattenDependencyTree(dependencyTreeNodes(declaration.name, index, new Set([declaration.name])));
+  const dependencies = [...dependencyNames]
+    .filter((name) => name !== declaration.name)
+    .map((name) => index.leanDeclarations.get(name))
+    .filter((item): item is LeanDeclaration => Boolean(item))
+    .sort(compareLeanDeclarationsBySource);
+
+  return [...dependencies, declaration];
+}
+
+function flattenDependencyTree(nodes: readonly DependencyTreeNode[]): Set<string> {
+  const result = new Set<string>();
+
+  const visit = (node: DependencyTreeNode) => {
+    for (const child of node.children) {
+      visit(child);
+    }
+    result.add(node.name);
+  };
+
+  for (const node of nodes) {
+    visit(node);
+  }
+  return result;
+}
+
+function compareLeanDeclarationsBySource(first: LeanDeclaration, second: LeanDeclaration): number {
+  return first.uri.localeCompare(second.uri) ||
+    first.range.start.line - second.range.start.line ||
+    first.range.start.character - second.range.start.character ||
+    first.name.localeCompare(second.name);
 }
 
 function isTheoremLike(declaration: LeanDeclaration): boolean {
@@ -877,12 +946,13 @@ function renderDeclarationLabel(
   commandHref: (target: string) => string,
   editorHref: (target: string) => string,
   controlsLabel: string,
-  popoverBodyHtml = ""
+  popoverBodyHtml = "",
+  sourceName?: string
 ): string {
   const href = escapeHtml(commandHref(target));
   const editorLinkHref = escapeHtml(editorHref(target));
   const escapedTarget = escapeHtml(target);
-  const sourceLabel = escapeHtml(declarationSourceLabel(target));
+  const sourceLabel = escapeHtml(sourceName ?? declarationSourceLabel(target));
   return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
 }
 
@@ -949,7 +1019,8 @@ function renderDependencyNode(
 }
 
 function dependencyDisplayName(name: string, index: HandwaveIndex): string {
-  return index.leanDeclarations.get(name)?.doc?.fields.name?.trim() || shortLeanName(name);
+  const declaration = index.leanDeclarations.get(name);
+  return declaration?.doc?.fields.name?.trim() || shortLeanName(declaration?.sourceName ?? name);
 }
 
 function shortLeanName(name: string): string {

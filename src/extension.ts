@@ -42,7 +42,6 @@ interface LeanAxiomCheckRequest {
 }
 
 interface LeanAxiomCheckJob {
-  key: string;
   label: string;
   requests: LeanAxiomCheckRequest[];
 }
@@ -50,12 +49,6 @@ interface LeanAxiomCheckJob {
 interface PrioritizedLeanDeclaration {
   declaration: LeanDeclaration;
   priority: number;
-}
-
-interface LeanAxiomCheckOptions {
-  jobKey?: string;
-  jobLabel?: string;
-  priorityForDeclaration?: (declaration: LeanDeclaration) => number;
 }
 
 const topLevelPendingPriority = 0;
@@ -87,7 +80,6 @@ class HandwaveController
   private readonly leanDiagnosticUrisRequested = new Set<string>();
   private readonly leanAxiomCheckStatuses = new Map<string, LeanDeclarationCheckStatus>();
   private readonly leanAxiomChecksRequested = new Set<string>();
-  private readonly leanAxiomCheckQueue = new Map<string, LeanAxiomCheckJob>();
   private declarations: LeanDeclaration[] = [];
   private articles: ArticleDocument[] = [];
   private index = new HandwaveIndex("", [], []);
@@ -421,7 +413,6 @@ class HandwaveController
     this.leanAxiomCheckGeneration++;
     this.leanAxiomCheckStatuses.clear();
     this.leanAxiomChecksRequested.clear();
-    this.leanAxiomCheckQueue.clear();
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
       this.axiomCheckTimer = undefined;
@@ -431,10 +422,9 @@ class HandwaveController
   private markLeanAxiomChecksStale(): void {
     // A Lean source or compiled-artifact change can alter the transitive axiom
     // footprint of declarations in other files. Keep the latest known answers
-    // visible, but make them stale and allow fresh probes to be queued.
+    // visible, but make them stale and allow fresh probes to be requested.
     this.leanAxiomCheckGeneration++;
     this.leanAxiomChecksRequested.clear();
-    this.leanAxiomCheckQueue.clear();
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
       this.axiomCheckTimer = undefined;
@@ -458,24 +448,6 @@ class HandwaveController
     for (const name of this.leanAxiomChecksRequested) {
       if (!names.has(name)) {
         this.leanAxiomChecksRequested.delete(name);
-      }
-    }
-    this.removeLeanAxiomRequestsFromQueue(new Set(
-      [...this.leanAxiomCheckQueue.values()]
-        .flatMap((job) => job.requests.map((request) => request.declaration.name))
-        .filter((name) => !names.has(name))
-    ));
-  }
-
-  private removeLeanAxiomRequestsFromQueue(names: ReadonlySet<string>): void {
-    if (names.size === 0) {
-      return;
-    }
-
-    for (const [key, job] of this.leanAxiomCheckQueue) {
-      job.requests = job.requests.filter((request) => !names.has(request.declaration.name));
-      if (job.requests.length === 0) {
-        this.leanAxiomCheckQueue.delete(key);
       }
     }
   }
@@ -553,31 +525,27 @@ class HandwaveController
 
         theoremDeclarations.set(declaration.name, declaration);
       }
-      const prioritized = this.prioritizedTheoremDeclarationsWithHoverDependencies([...theoremDeclarations.values()]);
       await this.triggerLeanDiagnosticsForDeclarations(
-        prioritized.map((item) => item.declaration),
-        {
-          jobKey: `article:${article.uri}`,
-          jobLabel: vscode.workspace.asRelativePath(article.uri, false),
-          priorityForDeclaration: priorityForDeclaration(prioritized)
-        }
+        [...theoremDeclarations.values()]
       );
     }
   }
 
   private async triggerLeanDiagnosticsForDeclarations(
-    declarations: readonly LeanDeclaration[],
-    options: LeanAxiomCheckOptions = {}
+    declarations: readonly LeanDeclaration[]
   ): Promise<void> {
+    await this.openLeanDocumentsForDeclarations(declarations);
+    this.scheduleLeanAxiomCheckFlush();
+    this.refreshLeanStatusViews();
+  }
+
+  private async openLeanDocumentsForDeclarations(declarations: readonly LeanDeclaration[]): Promise<void> {
     const uris = new Map<string, vscode.Uri>();
     for (const declaration of declarations) {
       if (!this.leanDiagnosticUrisRequested.has(declaration.uri)) {
         uris.set(declaration.uri, vscode.Uri.file(declaration.uri));
       }
     }
-
-    void this.triggerLeanAxiomChecks(declarations, options);
-    this.refreshLeanStatusViews();
 
     for (const uri of uris.values()) {
       this.leanDiagnosticUrisRequested.add(uri.fsPath);
@@ -598,40 +566,48 @@ class HandwaveController
     void this.refreshPreviews();
   }
 
-  private async triggerLeanAxiomChecks(
-    declarations: readonly LeanDeclaration[],
-    options: LeanAxiomCheckOptions = {}
-  ): Promise<void> {
-    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+  private nextLeanAxiomCheckJobForOpenPreviews(
+    workspaceFolders: readonly vscode.WorkspaceFolder[]
+  ): LeanAxiomCheckJob | undefined {
     if (workspaceFolders.length === 0) {
-      return;
+      return undefined;
     }
     const config = vscode.workspace.getConfiguration("handwave");
     if (!config.get<boolean>("enableLeanDependencyChecks", true)) {
-      return;
+      return undefined;
     }
 
-    const diagnosticStatuses = collectLeanDiagnosticCheckStatuses(declarations, this.leanDiagnosticUrisSeen);
+    const candidates = this.pendingLeanAxiomDeclarationsForOpenPreviews(workspaceFolders);
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    const batchSize = Math.max(1, Math.floor(config.get<number>("leanDependencyCheckBatchSize", 16)));
     const requests: LeanAxiomCheckRequest[] = [];
+    let selectedRoot: string | undefined;
+    const selectedUris = new Set<string>();
+    let selectedHasPrivate = false;
 
-    for (const declaration of declarations) {
-      const priority = options.priorityForDeclaration?.(declaration) ?? defaultLeanAxiomPriority;
-      if (this.leanAxiomChecksRequested.has(declaration.name)) {
-        this.prioritizeQueuedLeanAxiomRequest(declaration.name, priority);
-        continue;
-      }
-      if (leanFileHasBlockingDiagnostics(declaration.uri)) {
-        continue;
-      }
-      const diagnosticStatus = diagnosticStatuses.get(declaration.name);
-      if (diagnosticStatus && !diagnosticStatus.checked) {
-        continue;
-      }
-
+    for (const { declaration, priority } of candidates) {
       const target = leanAxiomProbeTarget(declaration.uri, workspaceFolders);
       if (!target) {
         continue;
       }
+      if (selectedRoot !== undefined && selectedRoot !== target.root) {
+        continue;
+      }
+      if (
+        (selectedHasPrivate && !selectedUris.has(declaration.uri)) ||
+        (declaration.isPrivate &&
+          selectedUris.size > 0 &&
+          (selectedUris.size > 1 || !selectedUris.has(declaration.uri)))
+      ) {
+        continue;
+      }
+
+      selectedRoot = target.root;
+      selectedUris.add(declaration.uri);
+      selectedHasPrivate = selectedHasPrivate || declaration.isPrivate;
 
       this.leanAxiomChecksRequested.add(declaration.name);
       requests.push({
@@ -639,50 +615,62 @@ class HandwaveController
         generation: this.leanAxiomCheckGeneration,
         priority
       });
+
+      if (requests.length >= batchSize) {
+        break;
+      }
     }
 
-    if (requests.length > 0) {
-      this.enqueueLeanAxiomCheckJob({
-        key: options.jobKey ?? leanAxiomDefaultJobKey(requests),
-        label: options.jobLabel ?? leanAxiomDefaultJobLabel(requests),
-        requests
-      });
-      this.scheduleLeanAxiomCheckFlush();
+    if (requests.length === 0) {
+      return undefined;
     }
+
+    requests.sort(compareLeanAxiomCheckRequests);
+    return {
+      label: leanAxiomDemandJobLabel(requests),
+      requests
+    };
   }
 
-  private enqueueLeanAxiomCheckJob(job: LeanAxiomCheckJob): void {
-    const existing = this.leanAxiomCheckQueue.get(job.key);
-    if (!existing) {
-      job.requests.sort(compareLeanAxiomCheckRequests);
-      this.leanAxiomCheckQueue.set(job.key, job);
-      return;
+  private pendingLeanAxiomDeclarationsForOpenPreviews(
+    workspaceFolders: readonly vscode.WorkspaceFolder[]
+  ): PrioritizedLeanDeclaration[] {
+    const visible = this.visibleTheoremDeclarationsForOpenPreviews();
+    if (visible.length === 0) {
+      return [];
     }
 
-    const existingByName = new Map(existing.requests.map((request) => [request.declaration.name, request]));
-    for (const request of job.requests) {
-      const existingRequest = existingByName.get(request.declaration.name);
-      if (!existingRequest) {
-        existing.requests.push(request);
-        existingByName.set(request.declaration.name, request);
-        continue;
-      }
-
-      existingRequest.priority = Math.min(existingRequest.priority, request.priority);
-    }
-    existing.requests.sort(compareLeanAxiomCheckRequests);
+    const diagnosticStatuses = collectLeanDiagnosticCheckStatuses(
+      visible.map((item) => item.declaration),
+      this.leanDiagnosticUrisSeen
+    );
+    return visible
+      .filter(({ declaration }) =>
+        this.needsLeanAxiomCheck(declaration, workspaceFolders, diagnosticStatuses)
+      )
+      .sort(comparePrioritizedLeanDeclarations);
   }
 
-  private prioritizeQueuedLeanAxiomRequest(name: string, priority: number): void {
-    for (const job of this.leanAxiomCheckQueue.values()) {
-      const request = job.requests.find((item) => item.declaration.name === name);
-      if (!request || request.priority <= priority) {
-        continue;
-      }
-
-      request.priority = priority;
-      job.requests.sort(compareLeanAxiomCheckRequests);
+  private needsLeanAxiomCheck(
+    declaration: LeanDeclaration,
+    workspaceFolders: readonly vscode.WorkspaceFolder[],
+    diagnosticStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus>
+  ): boolean {
+    const status = this.index.checkStatusForLean(declaration.name);
+    if (status && !status.stale) {
+      return false;
     }
+    if (this.leanAxiomChecksRequested.has(declaration.name)) {
+      return false;
+    }
+    if (leanFileHasBlockingDiagnostics(declaration.uri)) {
+      return false;
+    }
+    const diagnosticStatus = diagnosticStatuses.get(declaration.name);
+    if (diagnosticStatus && !diagnosticStatus.checked) {
+      return false;
+    }
+    return Boolean(leanAxiomProbeTarget(declaration.uri, workspaceFolders));
   }
 
   private scheduleLeanAxiomCheckFlush(): void {
@@ -699,40 +687,31 @@ class HandwaveController
 
   private async flushLeanAxiomChecks(): Promise<void> {
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-    if (workspaceFolders.length === 0 || this.leanAxiomCheckQueue.size === 0) {
+    if (workspaceFolders.length === 0) {
       return;
     }
     if (this.isFlushingAxiomChecks) {
-      this.scheduleLeanAxiomCheckFlush();
       return;
     }
 
-    const queued = [...this.leanAxiomCheckQueue.values()].sort(compareLeanAxiomCheckJobs);
-    this.leanAxiomCheckQueue.clear();
+    const job = this.nextLeanAxiomCheckJobForOpenPreviews(workspaceFolders);
+    if (!job) {
+      return;
+    }
 
-    let changed = false;
-    let completedSuccessfully = false;
     this.isFlushingAxiomChecks = true;
+    let jobResult = { changed: false, completedSuccessfully: false };
     try {
-      for (const job of queued) {
-        const jobResult = await this.runLeanAxiomProbeJob(job, workspaceFolders);
-        changed = jobResult.changed || changed;
-        completedSuccessfully = jobResult.completedSuccessfully || completedSuccessfully;
-        if (jobResult.changed) {
-          this.refreshLeanStatusViews();
-        }
-      }
+      await this.openLeanDocumentsForDeclarations(job.requests.map((request) => request.declaration));
+      jobResult = await this.runLeanAxiomProbeJob(job, workspaceFolders);
     } finally {
       this.isFlushingAxiomChecks = false;
     }
 
-    if (changed) {
+    if (jobResult.changed) {
       this.refreshLeanStatusViews();
     }
-    if (completedSuccessfully) {
-      await this.triggerLeanDiagnosticsForUnresolvedOpenPreviews();
-    }
-    if (this.leanAxiomCheckQueue.size > 0) {
+    if (jobResult.completedSuccessfully || jobResult.changed) {
       this.scheduleLeanAxiomCheckFlush();
     }
   }
@@ -784,7 +763,7 @@ class HandwaveController
         if (!this.isCurrentAxiomRequest(request)) {
           continue;
         }
-        const axioms = axiomsByName.get(name);
+        const axioms = axiomsForDeclaration(axiomsByName, request.declaration);
         if (!axioms) {
           batchChanged = this.recordInconclusiveLeanAxiomStatus(
             request,
@@ -917,29 +896,6 @@ class HandwaveController
     }
   }
 
-  private async triggerLeanDiagnosticsForUnresolvedOpenPreviews(): Promise<void> {
-    for (const state of this.previewPanels.values()) {
-      const prioritized = this.prioritizedTheoremDeclarationsWithHoverDependencies(
-        this.theoremDeclarationsForPreviewState(state)
-      ).filter((item) => {
-        const status = this.index.checkStatusForLean(item.declaration.name);
-        return !status || Boolean(status.stale);
-      });
-      const declarations = prioritized.map((item) => item.declaration);
-      if (declarations.length === 0) {
-        continue;
-      }
-      await this.triggerLeanDiagnosticsForDeclarations(
-        declarations,
-        {
-          jobKey: `unresolved:${isArticleUri(state.uri) ? "article" : "lean"}:${state.uri.fsPath}`,
-          jobLabel: vscode.workspace.asRelativePath(state.uri.fsPath, false),
-          priorityForDeclaration: priorityForDeclaration(prioritized)
-        }
-      );
-    }
-  }
-
   provideDocumentLinks(document: vscode.TextDocument): vscode.DocumentLink[] {
     const article = parseArticleDocument(document.getText(), document.uri.fsPath);
     return [...article.links, ...article.includes].map((ref) => {
@@ -983,7 +939,7 @@ class HandwaveController
     }
 
     const markdown = new vscode.MarkdownString();
-    markdown.appendMarkdown(`**${declaration.name}**\n\n`);
+    markdown.appendMarkdown(`**${declaration.sourceName}**\n\n`);
     markdown.appendCodeblock(declaration.statement, "lean");
     if (declaration.doc?.fields.statement) {
       markdown.appendMarkdown(`\n${declaration.doc.fields.statement}`);
@@ -1068,7 +1024,7 @@ class HandwaveController
       "handwave.articlePreview",
       `Handwave: ${previewUri.path.split("/").pop() ?? "Preview"}`,
       vscode.ViewColumn.Beside,
-      { enableCommandUris: true, enableScripts: true }
+      { enableCommandUris: true, enableFindWidget: true, enableScripts: true }
     );
 
     const state = this.createPreviewState(key, panel, previewUri);
@@ -1327,7 +1283,7 @@ class HandwaveController
       "handwave.articlePreview",
       `Handwave: ${uri.path.split("/").pop() ?? "Preview"}`,
       vscode.ViewColumn.Beside,
-      { enableCommandUris: true, enableScripts: true }
+      { enableCommandUris: true, enableFindWidget: true, enableScripts: true }
     );
     const nextState = this.createPreviewState(key, panel, uri, focusIdForTarget(target), target);
     this.registerPreviewState(nextState);
@@ -1336,63 +1292,80 @@ class HandwaveController
   }
 
   private async triggerLeanDiagnosticsForPreview(state: HandwavePreviewState): Promise<void> {
-    const prioritized = this.prioritizedTheoremDeclarationsWithHoverDependencies(
-      this.theoremDeclarationsForPreviewState(state)
-    );
-    const declarations = prioritized.map((item) => item.declaration);
+    const declarations = this.visibleTheoremDeclarationsForPreviewState(state)
+      .map((item) => item.declaration);
     if (declarations.length === 0) {
       return;
     }
-    await this.triggerLeanDiagnosticsForDeclarations(
-      declarations,
-      {
-        jobKey: `${isArticleUri(state.uri) ? "article" : "lean"}:${state.uri.fsPath}`,
-        jobLabel: vscode.workspace.asRelativePath(state.uri.fsPath, false),
-        priorityForDeclaration: priorityForDeclaration(prioritized)
+    await this.triggerLeanDiagnosticsForDeclarations(declarations);
+  }
+
+  private visibleTheoremDeclarationsForOpenPreviews(): PrioritizedLeanDeclaration[] {
+    const result = new Map<string, PrioritizedLeanDeclaration>();
+    for (const state of this.previewPanels.values()) {
+      for (const item of this.visibleTheoremDeclarationsForPreviewState(state)) {
+        const existing = result.get(item.declaration.name);
+        if (!existing || item.priority < existing.priority) {
+          result.set(item.declaration.name, item);
+        }
       }
-    );
+    }
+    return [...result.values()].sort(comparePrioritizedLeanDeclarations);
   }
 
-  private theoremDeclarationsWithHoverDependencies(declarations: readonly LeanDeclaration[]): LeanDeclaration[] {
-    return this.prioritizedTheoremDeclarationsWithHoverDependencies(declarations)
-      .map((item) => item.declaration);
-  }
-
-  private prioritizedTheoremDeclarationsWithHoverDependencies(
-    declarations: readonly LeanDeclaration[]
+  private visibleTheoremDeclarationsForPreviewState(
+    state: HandwavePreviewState
   ): PrioritizedLeanDeclaration[] {
     const result = new Map<string, LeanDeclaration>();
     const priorities = new Map<string, number>();
-    const queue = declarations.map((declaration) => ({
-      declaration,
-      depth: 0,
-      priority: this.topLevelLeanAxiomPriority(declaration)
-    }));
-
-    while (queue.length > 0) {
-      const item = queue.shift()!;
-      const { declaration } = item;
+    const visit = (
+      declaration: LeanDeclaration,
+      priority: number,
+      depth: number,
+      path: ReadonlySet<string>
+    ) => {
       const existingPriority = priorities.get(declaration.name);
-      if (existingPriority !== undefined && existingPriority <= item.priority) {
-        continue;
+      if (existingPriority !== undefined && existingPriority < priority) {
+        return;
       }
 
       result.set(declaration.name, declaration);
-      priorities.set(declaration.name, item.priority);
+      priorities.set(declaration.name, priority);
       for (const dependencyName of this.index.dependenciesForLean(declaration.name)) {
         const dependency = this.index.leanDeclarations.get(dependencyName);
         if (
-          dependency &&
-          isTheoremLikeDeclaration(dependency)
+          !dependency ||
+          !isTheoremLikeDeclaration(dependency)
         ) {
-          const depth = item.depth + 1;
-          queue.push({
-            declaration: dependency,
-            depth,
-            priority: directDependencyPriority + Math.max(0, depth - 1)
-          });
+          continue;
+        }
+        const dependencyPriority = directDependencyPriority + depth;
+        const status = this.index.checkStatusForLean(dependency.name);
+        if (status && !status.checked && !path.has(dependency.name)) {
+          visit(
+            dependency,
+            dependencyPriority,
+            depth + 1,
+            new Set([...path, dependency.name])
+          );
+          continue;
+        }
+
+        const dependencyPriorityExisting = priorities.get(dependency.name);
+        if (dependencyPriorityExisting === undefined || dependencyPriority < dependencyPriorityExisting) {
+          result.set(dependency.name, dependency);
+          priorities.set(dependency.name, dependencyPriority);
         }
       }
+    };
+
+    for (const declaration of this.theoremDeclarationsForPreviewState(state)) {
+      visit(
+        declaration,
+        this.topLevelLeanAxiomPriority(declaration),
+        0,
+        new Set([declaration.name])
+      );
     }
 
     return [...result.values()]
@@ -1444,6 +1417,7 @@ class HandwaveController
     return this.declarations.filter((declaration) =>
       declaration.uri === state.uri.fsPath &&
       isTheoremLikeDeclaration(declaration) &&
+      (!declaration.isPrivate || (target?.kind === "lean" && declaration.name === target.base)) &&
       (!target || target.kind !== "lean" || declaration.name === target.base)
     );
   }
@@ -1456,11 +1430,8 @@ class HandwaveController
 
     const declarations = new Map<string, LeanDeclaration>();
     for (const state of this.previewPanels.values()) {
-      const previewDeclarations = this.theoremDeclarationsWithHoverDependencies(
-        this.theoremDeclarationsForPreviewState(state)
-      );
-      for (const declaration of previewDeclarations) {
-        declarations.set(declaration.name, declaration);
+      for (const item of this.visibleTheoremDeclarationsForPreviewState(state)) {
+        declarations.set(item.declaration.name, item.declaration);
       }
     }
     if (declarations.size === 0) {
@@ -1561,7 +1532,9 @@ class HandwaveController
 
     const items = this.declarations.map((declaration) => ({
       label: `lean:${declaration.name}`,
-      description: declaration.uri
+      description: declaration.isPrivate
+        ? `${declaration.sourceName} - private - ${declaration.uri}`
+        : declaration.uri
     }));
     return (await vscode.window.showQuickPick(items, { placeHolder: "Choose a Handwave target" }))?.label;
   }
@@ -1638,13 +1611,6 @@ function collectLeanDiagnosticCheckStatuses(
   return statuses;
 }
 
-function priorityForDeclaration(
-  declarations: readonly PrioritizedLeanDeclaration[]
-): (declaration: LeanDeclaration) => number {
-  const priorities = new Map(declarations.map((item) => [item.declaration.name, item.priority]));
-  return (declaration) => priorities.get(declaration.name) ?? defaultLeanAxiomPriority;
-}
-
 function comparePrioritizedLeanDeclarations(
   first: PrioritizedLeanDeclaration,
   second: PrioritizedLeanDeclaration
@@ -1659,15 +1625,6 @@ function compareLeanAxiomCheckRequests(
 ): number {
   return first.priority - second.priority ||
     first.declaration.name.localeCompare(second.declaration.name);
-}
-
-function compareLeanAxiomCheckJobs(first: LeanAxiomCheckJob, second: LeanAxiomCheckJob): number {
-  return minLeanAxiomPriority(first.requests) - minLeanAxiomPriority(second.requests) ||
-    first.label.localeCompare(second.label);
-}
-
-function minLeanAxiomPriority(requests: readonly LeanAxiomCheckRequest[]): number {
-  return requests.reduce((priority, request) => Math.min(priority, request.priority), defaultLeanAxiomPriority);
 }
 
 function chunkLeanAxiomRequests(
@@ -1701,6 +1658,22 @@ function directIncompleteProofStatus(declaration: LeanDeclaration): LeanDeclarat
     failedDependencies: [],
     reason: `Lean declaration contains a direct \`${token}\`.`
   };
+}
+
+function axiomsForDeclaration(
+  axiomsByName: ReadonlyMap<string, string[]>,
+  declaration: LeanDeclaration
+): string[] | undefined {
+  const exact = axiomsByName.get(declaration.name) ?? axiomsByName.get(declaration.sourceName);
+  if (exact || !declaration.isPrivate) {
+    return exact;
+  }
+
+  const suffix = `.${declaration.sourceName}`;
+  const matches = [...axiomsByName]
+    .filter(([name]) => name.endsWith(suffix))
+    .map(([, axioms]) => axioms);
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function mergeLeanCheckStatuses(
@@ -1803,7 +1776,7 @@ async function leanAxiomProbeInput(
   root: string,
   requests: readonly LeanAxiomCheckRequest[]
 ): Promise<string> {
-  const names = requests.map((request) => request.declaration.name);
+    const names = requests.map((request) => request.declaration.sourceName);
   const uniqueUris = [...new Set(requests.map((request) => request.declaration.uri))].sort();
   if (uniqueUris.length === 1) {
     const source = await readWorkspaceText(vscode.Uri.file(uniqueUris[0]));
@@ -1863,12 +1836,7 @@ function leanCompiledArtifactPaths(
   return [`${artifactBase}.olean`, `${artifactBase}.ilean`];
 }
 
-function leanAxiomDefaultJobKey(requests: readonly LeanAxiomCheckRequest[]): string {
-  const uris = [...new Set(requests.map((request) => request.declaration.uri))].sort();
-  return `declarations:${uris.join("\0")}`;
-}
-
-function leanAxiomDefaultJobLabel(requests: readonly LeanAxiomCheckRequest[]): string {
+function leanAxiomDemandJobLabel(requests: readonly LeanAxiomCheckRequest[]): string {
   const uris = [...new Set(requests.map((request) => request.declaration.uri))].sort();
   if (uris.length === 1) {
     return vscode.workspace.asRelativePath(uris[0], false);

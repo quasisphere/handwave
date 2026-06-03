@@ -41,17 +41,18 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     }
 
     const declStart = comment.end + match.index;
-    if (isPrivateLeanDeclarationAt(text, declStart)) {
-      continue;
-    }
+    const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
+    const sourceName = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
+    const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
     const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
     const declarationText = text.slice(declStart, statementEnd).trim();
     const parts = splitLeanDeclaration(declarationText);
     declarations.push({
       name,
+      sourceName,
       kind: match[1],
+      isPrivate,
       statement: declarationText,
       leanStatement: parts.leanStatement,
       leanProof: parts.leanProof,
@@ -65,11 +66,10 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
   declarationPattern.lastIndex = 0;
   for (const match of searchableText.matchAll(declarationPattern)) {
     const declStart = match.index ?? 0;
-    if (isPrivateLeanDeclarationAt(text, declStart)) {
-      continue;
-    }
+    const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const name = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
+    const sourceName = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
+    const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
     if (declarations.some((decl) => decl.name === name)) {
       continue;
     }
@@ -79,7 +79,9 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const parts = splitLeanDeclaration(declarationText);
     declarations.push({
       name,
+      sourceName,
       kind: match[1],
+      isPrivate,
       statement: declarationText,
       leanStatement: parts.leanStatement,
       leanProof: parts.leanProof,
@@ -218,6 +220,28 @@ function collectDocComments(text: string): Array<{ text: string; start: number; 
 function isPrivateLeanDeclarationAt(text: string, declarationOffset: number): boolean {
   const lineStart = text.lastIndexOf("\n", Math.max(0, declarationOffset - 1)) + 1;
   return /\bprivate\b/.test(text.slice(lineStart, declarationOffset));
+}
+
+function declarationIndexName(
+  uri: string,
+  sourceName: string,
+  isPrivate: boolean,
+  declarationOffset: number
+): string {
+  if (!isPrivate) {
+    return sourceName;
+  }
+
+  return `${sourceName}._handwavePrivate_${hashString(`${uri}:${declarationOffset}`)}`;
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function parseHandwaveDoc(comment: string, range: RangeLike, sourceText: string): HandwaveDoc {
@@ -382,20 +406,43 @@ function qualifyLeanName(text: string, declarationOffset: number, name: string):
 }
 
 function namespaceAt(text: string, offset: number): string[] {
-  const stack: string[] = [];
+  type ScopeEntry =
+    | { kind: "namespace"; name: string }
+    | { kind: "section"; name?: string };
+  const stack: ScopeEntry[] = [];
   const namespacePattern =
-    /^\s*(?:namespace[ \t]+([A-Za-z_][A-Za-z0-9_'.]*(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)*)|end(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?)\b/gm;
+    /^\s*(?:(namespace)[ \t]+([A-Za-z_][A-Za-z0-9_'.]*(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)*)|(section)(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?|end(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?)\b/gm;
   const prefix = text.slice(0, offset);
 
   for (const match of prefix.matchAll(namespacePattern)) {
-    const opened = match[1];
-    if (opened) {
-      stack.push(...opened.trim().split(/\s+/).flatMap((part) => part.split(".")).filter(Boolean));
+    const openedNamespace = match[1];
+    if (openedNamespace) {
+      stack.push(
+        ...match[2]
+          .trim()
+          .split(/\s+/)
+          .flatMap((part) => part.split("."))
+          .filter(Boolean)
+          .map((name) => ({ kind: "namespace" as const, name }))
+      );
       continue;
     }
 
-    const closed = match[2];
+    const openedSection = match[3];
+    if (openedSection) {
+      const name = match[4];
+      stack.push(name ? { kind: "section", name } : { kind: "section" });
+      continue;
+    }
+
+    const closed = match[5];
     if (!closed) {
+      stack.pop();
+      continue;
+    }
+
+    const top = stack[stack.length - 1];
+    if (top?.kind === "section" && top.name === closed) {
       stack.pop();
       continue;
     }
@@ -406,15 +453,24 @@ function namespaceAt(text: string, offset: number): string[] {
       continue;
     }
 
-    const suffixStart = stack.length - parts.length;
-    if (suffixStart >= 0 && parts.every((part, index) => stack[suffixStart + index] === part)) {
-      stack.splice(suffixStart);
+    const namespaceEntries = stack
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.kind === "namespace") as Array<{
+        entry: { kind: "namespace"; name: string };
+        index: number;
+      }>;
+    const suffixStart = namespaceEntries.length - parts.length;
+    if (
+      suffixStart >= 0 &&
+      parts.every((part, index) => namespaceEntries[suffixStart + index].entry.name === part)
+    ) {
+      stack.splice(namespaceEntries[suffixStart].index);
     } else {
       stack.pop();
     }
   }
 
-  return stack;
+  return stack.flatMap((entry) => (entry.kind === "namespace" ? [entry.name] : []));
 }
 
 function splitLeanDeclaration(declarationText: string): { leanStatement: string; leanProof?: string } {

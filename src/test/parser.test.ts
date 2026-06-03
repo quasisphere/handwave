@@ -4,7 +4,7 @@ import { HandwaveIndex } from "../handwave/index";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import { parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
-import { renderArticleHtml, renderLeanDocumentHtml } from "../handwave/renderer";
+import { leanDeclarationAnchorId, renderArticleHtml, renderLeanDocumentHtml } from "../handwave/renderer";
 
 const leanText = `/--
 %%handwave
@@ -127,6 +127,27 @@ end DependencyTree
 
 const privateDependencyLeanText = `namespace PrivateDependency
 
+private theorem hidden_leaf : True := by
+  sorry
+
+private theorem hidden_dep : True := by
+  exact hidden_leaf
+
+/--
+%%handwave
+name:
+  Public dependency
+statement:
+  This theorem uses a private implementation lemma.
+-/
+theorem public_dep : True := by
+  exact hidden_dep
+
+end CompletePrivateDependency
+`;
+
+const completePrivateDependencyLeanText = `namespace CompletePrivateDependency
+
 private theorem hidden_dep : True := by
   trivial
 
@@ -154,6 +175,17 @@ function leanStatus(
     failedDependencies,
     reason
   };
+}
+
+function declarationBySourceName(
+  declarations: ReturnType<typeof parseLeanDocument>,
+  sourceName: string
+) {
+  return declarations.find((declaration) => declaration.sourceName === sourceName);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 test("parses Handwave Lean doc comments and declarations", () => {
@@ -400,14 +432,71 @@ test("renders theorem hover dependency tree with recursive incomplete dependenci
   assert.ok(greenIndex >= 0 && yellowIndex > greenIndex && redIndex > yellowIndex);
 });
 
-test("does not index private Lean declarations as dependency tree nodes", () => {
+test("indexes private Lean declarations as dependency tree nodes", () => {
   const declarations = parseLeanDocument(privateDependencyLeanText, "/workspace/PrivateDependency.lean");
-  const article = parseArticleDocument("@include{lean:PrivateDependency.public_dep}", "/workspace/private-dependency.hw.md");
-  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const hiddenLeaf = declarationBySourceName(declarations, "PrivateDependency.hidden_leaf");
+  const hiddenDep = declarationBySourceName(declarations, "PrivateDependency.hidden_dep");
+  const articleText = "@include{lean:PrivateDependency.public_dep}";
+  const article = parseArticleDocument(articleText, "/workspace/private-dependency.hw.md");
+
+  assert.ok(hiddenLeaf);
+  assert.ok(hiddenDep);
+  assert.equal(hiddenLeaf.isPrivate, true);
+  assert.equal(hiddenDep.isPrivate, true);
+  assert.match(hiddenDep.name, /^PrivateDependency\.hidden_dep\._handwavePrivate_/);
+
+  const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
+    [hiddenLeaf.name, leanStatus(false, "Lean declaration contains a direct `sorry`.")],
+    [
+      hiddenDep.name,
+      leanStatus(
+        false,
+        `Unchecked dependencies: ${hiddenLeaf.name}.`,
+        [hiddenLeaf.name],
+        [hiddenLeaf.name]
+      )
+    ],
+    [
+      "PrivateDependency.public_dep",
+      leanStatus(
+        false,
+        `Unchecked dependencies: ${hiddenDep.name}.`,
+        [hiddenDep.name],
+        [hiddenDep.name]
+      )
+    ]
+  ]));
+  const html = renderArticleHtml(articleText, "/workspace/private-dependency.hw.md", index, (target) => `command:${target}`);
 
   assert.ok(index.leanDeclarations.has("PrivateDependency.public_dep"));
-  assert.equal(index.leanDeclarations.has("PrivateDependency.hidden_dep"), false);
-  assert.deepEqual(index.dependenciesForLean("PrivateDependency.public_dep"), []);
+  assert.ok(index.leanDeclarations.has(hiddenDep.name));
+  assert.deepEqual(index.dependenciesForLean("PrivateDependency.public_dep"), [hiddenDep.name]);
+  assert.deepEqual(index.dependenciesForLean(hiddenDep.name), [hiddenLeaf.name]);
+  assert.match(
+    html,
+    new RegExp(
+      `data-dependency-name="${escapeRegExp(hiddenDep.name)}" data-dependency-status="dependency-warning"[\\s\\S]*` +
+      `title="Open lean:${escapeRegExp(hiddenDep.name)}">hidden_dep</a>[\\s\\S]*` +
+      `data-dependency-name="${escapeRegExp(hiddenLeaf.name)}" data-dependency-status="unchecked"[\\s\\S]*` +
+      `title="Open lean:${escapeRegExp(hiddenLeaf.name)}">hidden_leaf</a>`
+    )
+  );
+});
+
+test("keeps private Lean declarations out of full-file previews", () => {
+  const declarations = parseLeanDocument(completePrivateDependencyLeanText, "/workspace/CompletePrivateDependency.lean");
+  const hiddenDep = declarationBySourceName(declarations, "CompletePrivateDependency.hidden_dep");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  const html = renderLeanDocumentHtml(
+    completePrivateDependencyLeanText,
+    "/workspace/CompletePrivateDependency.lean",
+    index,
+    (target) => `command:${target}`
+  );
+
+  assert.ok(hiddenDep);
+  assert.match(html, /CompletePrivateDependency\.public_dep/);
+  assert.doesNotMatch(html, new RegExp(`<section class="theorem-view" id="${escapeRegExp(leanDeclarationAnchorId(hiddenDep.name))}"`));
 });
 
 test("renders pending theorem status while Lean status is unavailable", () => {
@@ -586,4 +675,99 @@ test("renders Lean files as navigable declaration previews", () => {
   assert.match(html, /<section class="definition-view" id="lean-double" data-target="lean:double">/);
   assert.match(html, /focusHandwaveTarget\("lean-my_add_assoc"\)/);
   assert.match(html, /message\.type !== "replaceContent"/);
+});
+
+test("renders theorem targets as reduced dependency views", () => {
+  const source = `namespace LocalContext
+
+/--
+%%handwave
+name:
+  Complete dependency
+statement:
+  This dependency is complete.
+-/
+theorem green_dep : True := by
+  trivial
+
+/--
+%%handwave
+name:
+  Incomplete dependency
+statement:
+  This dependency is incomplete.
+-/
+theorem red_dep : True := by
+  sorry
+
+/--
+%%handwave
+statement:
+  This dependency is proved, but it relies on an incomplete theorem.
+-/
+theorem yellow_dep : True := by
+  exact red_dep
+
+/--
+%%handwave
+statement:
+  This theorem is not needed for the target theorem.
+-/
+theorem unrelated_dep : True := by
+  trivial
+
+/--
+%%handwave
+statement:
+  This theorem depends on both a complete theorem and a theorem with incomplete dependencies.
+-/
+theorem root_dep : True := by
+  have _ := green_dep
+  exact yellow_dep
+
+end LocalContext
+`;
+  const declarations = parseLeanDocument(source, "/workspace/LocalContext.lean");
+  const index = new HandwaveIndex("/workspace", declarations, [], new Map([
+    ["LocalContext.green_dep", leanStatus(true, "Lean axiom check reports no transitive dependency on sorryAx.")],
+    ["LocalContext.red_dep", leanStatus(false, "Lean declaration contains a direct `sorry`.")],
+    [
+      "LocalContext.yellow_dep",
+      leanStatus(
+        false,
+        "Unchecked dependencies: LocalContext.red_dep.",
+        ["LocalContext.red_dep"],
+        ["LocalContext.red_dep"]
+      )
+    ],
+    [
+      "LocalContext.root_dep",
+      leanStatus(
+        false,
+        "Unchecked dependencies: LocalContext.yellow_dep.",
+        ["LocalContext.yellow_dep"],
+        ["LocalContext.yellow_dep"]
+      )
+    ]
+  ]));
+  const html = renderLeanDocumentHtml(
+    source,
+    "/workspace/LocalContext.lean",
+    index,
+    (target) => `command:${target}`,
+    { currentTarget: "lean:LocalContext.root_dep", focusId: "lean-LocalContext-root_dep" }
+  );
+
+  assert.match(html, /<h1>root_dep<\/h1>/);
+  assert.match(html, /<section class="theorem-view" id="lean-LocalContext-green_dep" data-target="lean:LocalContext\.green_dep">/);
+  assert.match(html, /<section class="theorem-view" id="lean-LocalContext-red_dep" data-target="lean:LocalContext\.red_dep">/);
+  assert.match(html, /<section class="theorem-view" id="lean-LocalContext-yellow_dep" data-target="lean:LocalContext\.yellow_dep">/);
+  assert.match(html, /<section class="theorem-view" id="lean-LocalContext-root_dep" data-target="lean:LocalContext\.root_dep">/);
+  assert.doesNotMatch(html, /lean:LocalContext\.unrelated_dep/);
+
+  const greenIndex = html.indexOf('data-target="lean:LocalContext.green_dep"');
+  const redIndex = html.indexOf('data-target="lean:LocalContext.red_dep"');
+  const yellowIndex = html.indexOf('data-target="lean:LocalContext.yellow_dep"');
+  const rootIndex = html.indexOf('data-target="lean:LocalContext.root_dep"');
+  assert.ok(greenIndex >= 0 && redIndex > greenIndex && yellowIndex > redIndex && rootIndex > yellowIndex);
 });

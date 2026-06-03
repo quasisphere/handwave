@@ -21,7 +21,9 @@ export interface HandwaveDoc {
 
 export interface LeanDeclaration {
   name: string;
+  sourceName: string;
   kind: string;
+  isPrivate: boolean;
   statement: string;
   leanStatement: string;
   leanProof?: string;

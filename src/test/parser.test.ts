@@ -224,6 +224,27 @@ end RelWP
   assert.equal(declarations[0].name, "RelWP.HyperbolicMetric.sample_theorem");
 });
 
+test("ignores comment prose while tracking Lean namespaces", () => {
+  const declarations = parseLeanDocument(`namespace RelWP
+
+namespace Uniformization
+
+/--
+%%handwave
+statement:
+  An end-growth sentence in prose should not close the current namespace.
+-/
+theorem after_end_growth_prose : True := by
+  trivial
+
+end Uniformization
+
+end RelWP
+`, "/workspace/Namespaced.lean");
+
+  assert.equal(declarations[0].name, "RelWP.Uniformization.after_end_growth_prose");
+});
+
 test("does not parse Lean declarations from comments or strings", () => {
   const declarations = parseLeanDocument(`namespace RelWP
 

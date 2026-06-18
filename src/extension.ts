@@ -558,6 +558,7 @@ class HandwaveController
       this.leanDiagnosticUrisRequested.add(uri.fsPath);
       try {
         await vscode.workspace.openTextDocument(uri);
+        this.leanDiagnosticUrisSeen.add(uri.fsPath);
       } catch {
         this.leanDiagnosticUrisRequested.delete(uri.fsPath);
       }
@@ -1884,7 +1885,7 @@ async function leanAxiomProbeInput(
   root: string,
   requests: readonly LeanAxiomCheckRequest[]
 ): Promise<string> {
-    const names = requests.map((request) => request.declaration.sourceName);
+  const names = requests.map((request) => request.declaration.sourceName);
   const uniqueUris = [...new Set(requests.map((request) => request.declaration.uri))].sort();
   if (uniqueUris.length === 1) {
     const source = await readWorkspaceText(vscode.Uri.file(uniqueUris[0]));

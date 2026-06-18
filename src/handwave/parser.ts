@@ -43,7 +43,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const declStart = comment.end + match.index;
     const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const sourceName = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
+    const sourceName = qualifyLeanName(searchableText, declStart, stripLeanEscapes(match[2]));
     const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
     const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
     const declarationText = text.slice(declStart, statementEnd).trim();
@@ -68,7 +68,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const declStart = match.index ?? 0;
     const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const sourceName = qualifyLeanName(text, declStart, stripLeanEscapes(match[2]));
+    const sourceName = qualifyLeanName(searchableText, declStart, stripLeanEscapes(match[2]));
     const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
     if (declarations.some((decl) => decl.name === name)) {
       continue;
@@ -397,22 +397,22 @@ function stripLeanEscapes(name: string): string {
   return name;
 }
 
-function qualifyLeanName(text: string, declarationOffset: number, name: string): string {
-  const namespace = namespaceAt(text, declarationOffset);
+function qualifyLeanName(searchableText: string, declarationOffset: number, name: string): string {
+  const namespace = namespaceAt(searchableText, declarationOffset);
   if (!namespace.length) {
     return name;
   }
   return `${namespace.join(".")}.${name}`;
 }
 
-function namespaceAt(text: string, offset: number): string[] {
+function namespaceAt(searchableText: string, offset: number): string[] {
   type ScopeEntry =
     | { kind: "namespace"; name: string }
     | { kind: "section"; name?: string };
   const stack: ScopeEntry[] = [];
   const namespacePattern =
     /^\s*(?:(namespace)[ \t]+([A-Za-z_][A-Za-z0-9_'.]*(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)*)|(section)(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?|end(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?)\b/gm;
-  const prefix = text.slice(0, offset);
+  const prefix = searchableText.slice(0, offset);
 
   for (const match of prefix.matchAll(namespacePattern)) {
     const openedNamespace = match[1];

@@ -15,6 +15,7 @@ export interface SourceLocation {
 
 export interface HandwaveDoc {
   fields: Record<string, string>;
+  tags: string[];
   range: RangeLike;
   errors: ParseIssue[];
 }

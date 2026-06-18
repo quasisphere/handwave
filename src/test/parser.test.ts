@@ -2,7 +2,7 @@ import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { HandwaveIndex } from "../handwave/index";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
-import { parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
+import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
 import { leanDeclarationAnchorId, renderArticleHtml, renderLeanDocumentHtml } from "../handwave/renderer";
 
@@ -188,6 +188,9 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const inactiveMilestoneStarPattern =
+  /<button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:[^"]+" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button>/;
+
 test("parses Handwave Lean doc comments and declarations", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
 
@@ -201,6 +204,25 @@ test("parses Handwave Lean doc comments and declarations", () => {
   assert.match(declarations[0].statement, /^theorem my_add_assoc/);
   assert.match(declarations[0].leanStatement, /^theorem my_add_assoc/);
   assert.equal(declarations[0].leanProof, "by\n  exact Nat.add_assoc a b c");
+});
+
+test("parses Handwave declaration tags", () => {
+  const declarations = parseLeanDocument(`/--
+%%handwave
+tags:
+  milestone, Draft
+  milestone
+statement:
+  This theorem carries metadata tags.
+-/
+theorem tagged_result : True := by
+  trivial
+`, "/workspace/Tagged.lean");
+
+  assert.deepEqual(declarations[0].doc?.tags, ["milestone", "draft"]);
+  assert.equal(hasHandwaveTag(declarations[0].doc, "milestone"), true);
+  assert.equal(hasHandwaveTag(declarations[0].doc, "draft"), true);
+  assert.equal(hasHandwaveTag(declarations[0].doc, "other"), false);
 });
 
 test("parses namespace-qualified Lean declaration names", () => {
@@ -363,7 +385,7 @@ test("renders Lean statement includes as theorem views", () => {
   assert.match(html, /<a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="lean:my_add_assoc">parentheses do not matter<\/a>/);
   assert.match(html, /<strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
   assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
-  assert.match(html, /class="source-popover"><span class="source-popover-row"><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="editor:lean:my_add_assoc" title="Open my_add_assoc in editor">my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
+  assert.match(html, /class="source-popover"><span class="source-popover-row"><button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:my_add_assoc" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="editor:lean:my_add_assoc" title="Open my_add_assoc in editor">my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
   assert.match(html, /<div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾<\/button><span class="declaration-label"><strong>Proof\.<\/strong>.*<div class="proof-content">/);
   assert.match(html, /Use the standard associativity theorem\.<span class="qed" aria-label="QED">□<\/span>/);
   assert.match(html, /aria-label="Theorem view"/);
@@ -377,6 +399,38 @@ test("renders Lean statement includes as theorem views", () => {
   assert.match(html, /class="lean-source"/);
   assert.match(html, /<span class="lean-keyword">exact<\/span> <span class="lean-constant">Nat<\/span>\.add_assoc a b c/);
   assert.match(html, /<span class="lean-keyword">by<\/span>&#10;  <span class="lean-keyword">exact<\/span>/);
+});
+
+test("renders milestone theorem tags as star toggles", () => {
+  const source = `/--
+%%handwave
+name:
+  Tagged theorem
+tags:
+  milestone, draft
+statement:
+  This theorem is a milestone.
+-/
+theorem tagged_theorem : True := by
+  trivial
+
+/--
+%%handwave
+statement:
+  This theorem is not yet marked as a milestone.
+-/
+theorem untagged_theorem : True := by
+  trivial
+`;
+  const declarations = parseLeanDocument(source, "/workspace/Tagged.lean");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  const html = renderLeanDocumentHtml(source, "/workspace/Tagged.lean", index, (target) => `command:${target}`);
+
+  assert.match(html, /Theorem \(Tagged theorem\)\./);
+  assert.match(html, /<button class="milestone-control milestone-control-active" type="button" data-toggle-tag="milestone" data-handwave-target="lean:tagged_theorem" aria-pressed="true" title="Remove milestone tag" aria-label="Remove milestone tag">★<\/button><span class="view-switch" role="group" aria-label="Theorem view">/);
+  assert.match(html, inactiveMilestoneStarPattern);
+  assert.match(html, /<button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:untagged_theorem" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button><span class="view-switch" role="group" aria-label="Theorem view">/);
+  assert.match(html, /postMessage\(\{ type: "toggleTag", target: handwaveTarget, tag \}\)/);
 });
 
 test("renders theorem check status supplied by Lean diagnostics", () => {

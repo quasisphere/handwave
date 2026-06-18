@@ -45,6 +45,8 @@ statement:
   Addition of natural numbers is associative: $(a + b) + c = a + (b + c)$.
 proof:
   This follows from the standard associativity theorem for natural addition.
+tags:
+  milestone
 -/
 theorem my_add_assoc (a b c : Nat) :
     (a + b) + c = a + (b + c) := by
@@ -56,9 +58,15 @@ Common fields:
 - `name`: optional display name used in rendered labels.
 - `statement`: mathematical prose for the declaration statement.
 - `proof`: mathematical prose for the proof sketch.
+- `tags`: comma- or whitespace-separated metadata tags.
 
 Handwave also stores the Lean statement and Lean proof, so previews can toggle
 between prose and source views where appropriate.
+
+The special `milestone` tag marks an important theorem in the preview. Hover a
+theorem label to open its source popup; a filled or empty star appears before
+the text/Lean view toggle buttons. Click the star to toggle the `milestone` tag
+in the source block.
 
 ## Writing Handwave Articles
 

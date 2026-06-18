@@ -199,6 +199,35 @@ export function slugify(title: string): string {
   return slug || "section";
 }
 
+export function parseHandwaveTags(value: string | undefined): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+
+  for (const rawTag of (value ?? "").split(/[\s,]+/)) {
+    const tag = normalizeHandwaveTag(rawTag);
+    if (!tag || seen.has(tag)) {
+      continue;
+    }
+    tags.push(tag);
+    seen.add(tag);
+  }
+
+  return tags;
+}
+
+export function hasHandwaveTag(doc: HandwaveDoc | undefined, tag: string): boolean {
+  const normalized = normalizeHandwaveTag(tag);
+  return Boolean(normalized && doc?.tags.includes(normalized));
+}
+
+export function normalizeHandwaveTag(value: string): string | undefined {
+  const tag = value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_.-]*$/.test(tag)) {
+    return undefined;
+  }
+  return tag;
+}
+
 function collectDocComments(text: string): Array<{ text: string; start: number; end: number; range: RangeLike }> {
   const comments = [];
   const commentPattern = /\/--[\s\S]*?-\/\s*/g;
@@ -297,7 +326,7 @@ function parseHandwaveDoc(comment: string, range: RangeLike, sourceText: string)
   flush();
 
   const { id: _unusedId, ...rest } = fields;
-  return { fields: rest, range, errors };
+  return { fields: rest, tags: parseHandwaveTags(rest.tags), range, errors };
 }
 
 function findDeclarationStatementEnd(text: string, searchableText: string, start: number): number {

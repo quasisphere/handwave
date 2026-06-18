@@ -6,7 +6,13 @@ import { collectDiagnostics, DiagnosticIssue } from "./handwave/diagnostics";
 import { HandwaveIndex } from "./handwave/index";
 import { parseLeanAxiomOutput } from "./handwave/leanAxiom";
 import { containsPosition } from "./handwave/position";
-import { blankLeanCommentsAndStrings, parseArticleDocument, parseLeanDocument, parseTarget } from "./handwave/parser";
+import {
+  blankLeanCommentsAndStrings,
+  normalizeHandwaveTag,
+  parseArticleDocument,
+  parseLeanDocument,
+  parseTarget
+} from "./handwave/parser";
 import { leanDeclarationAnchorId, renderArticleHtml, renderLeanDocumentHtml } from "./handwave/renderer";
 import {
   ArticleDocument,
@@ -1338,6 +1344,7 @@ class HandwaveController
     const data = message as {
       type?: unknown;
       target?: unknown;
+      tag?: unknown;
       text?: unknown;
       uri?: unknown;
       focusId?: unknown;
@@ -1357,9 +1364,53 @@ class HandwaveController
       return;
     }
 
+    if (data.type === "toggleTag" && typeof data.target === "string" && typeof data.tag === "string") {
+      await this.toggleLeanDeclarationTag(data.target, data.tag);
+      return;
+    }
+
     if (data.type === "copy" && typeof data.text === "string") {
       await vscode.env.clipboard.writeText(data.text);
     }
+  }
+
+  private async toggleLeanDeclarationTag(rawTarget: string, rawTag: string): Promise<void> {
+    const tag = normalizeHandwaveTag(rawTag);
+    const target = parseTarget(rawTarget);
+    if (!tag || target.kind !== "lean") {
+      void vscode.window.showWarningMessage(`Handwave cannot toggle tag ${rawTag} for ${rawTarget}.`);
+      return;
+    }
+
+    const indexedDeclaration = this.index.leanDeclarations.get(target.base);
+    if (!indexedDeclaration || !isTheoremLikeDeclaration(indexedDeclaration)) {
+      void vscode.window.showWarningMessage(`Handwave theorem not found: ${rawTarget}`);
+      return;
+    }
+
+    const uri = vscode.Uri.file(indexedDeclaration.uri);
+    const document = await vscode.workspace.openTextDocument(uri);
+    const declaration = parseLeanDocument(document.getText(), uri.fsPath)
+      .find((item) => item.name === indexedDeclaration.name);
+    if (!declaration) {
+      void vscode.window.showWarningMessage(`Handwave theorem not found: ${rawTarget}`);
+      return;
+    }
+
+    const edit = new vscode.WorkspaceEdit();
+    applyToggleHandwaveTagEdit(edit, document, declaration, tag);
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      void vscode.window.showWarningMessage(`Handwave could not update tags for ${rawTarget}.`);
+      return;
+    }
+
+    const saved = await document.save();
+    if (!saved) {
+      void vscode.window.showWarningMessage(`Handwave updated tags for ${rawTarget}, but could not save the file.`);
+    }
+
+    await this.updateIndexedDocument(document);
   }
 
   private async openPreviewTarget(
@@ -1718,6 +1769,178 @@ function collectLeanDiagnosticCheckStatuses(
   }
 
   return statuses;
+}
+
+function applyToggleHandwaveTagEdit(
+  edit: vscode.WorkspaceEdit,
+  document: vscode.TextDocument,
+  declaration: LeanDeclaration,
+  tag: string
+): void {
+  const currentTags = declaration.doc?.tags ?? [];
+  const hasTag = currentTags.includes(tag);
+  const nextTags = hasTag
+    ? currentTags.filter((item) => item !== tag)
+    : [...currentTags, tag];
+
+  if (declaration.doc) {
+    applyHandwaveDocTagsEdit(edit, document, declaration, nextTags);
+    return;
+  }
+
+  const text = document.getText();
+  const declarationLineStart = document.offsetAt(new vscode.Position(declaration.range.start.line, 0));
+  const declarationStart = document.offsetAt(toVsCodeRange(declaration.range).start);
+  const indent = text.slice(declarationLineStart, declarationStart).match(/^[ \t]*/)?.[0] ?? "";
+  edit.insert(
+    document.uri,
+    new vscode.Position(declaration.range.start.line, 0),
+    handwaveDocBlockWithTags(nextTags, indent, documentNewline(document))
+  );
+}
+
+function applyHandwaveDocTagsEdit(
+  edit: vscode.WorkspaceEdit,
+  document: vscode.TextDocument,
+  declaration: LeanDeclaration,
+  tags: readonly string[]
+): void {
+  const doc = declaration.doc;
+  if (!doc) {
+    return;
+  }
+
+  const text = document.getText();
+  const docStart = document.offsetAt(toVsCodeRange(doc.range).start);
+  const docEnd = document.offsetAt(toVsCodeRange(doc.range).end);
+  const newline = documentNewline(document);
+  const closeStart = handwaveDocCloseStart(text, docStart, docEnd);
+  const closeLineStart = lineStartOffset(text, closeStart);
+  const fieldRange = findHandwaveFieldRange(text, docStart, closeStart, "tags");
+
+  if (tags.length === 0) {
+    if (fieldRange) {
+      edit.delete(document.uri, new vscode.Range(
+        document.positionAt(fieldRange.start),
+        document.positionAt(fieldRange.end)
+      ));
+    }
+    return;
+  }
+
+  const fieldText = handwaveFieldBlock(
+    fieldRange?.prefix ?? defaultHandwaveFieldPrefix(text, docStart, closeStart),
+    "tags",
+    tags.join(", "),
+    newline
+  );
+  if (fieldRange) {
+    edit.replace(
+      document.uri,
+      new vscode.Range(document.positionAt(fieldRange.start), document.positionAt(fieldRange.end)),
+      fieldText
+    );
+    return;
+  }
+
+  edit.insert(document.uri, document.positionAt(closeLineStart), fieldText);
+}
+
+function handwaveDocBlockWithTags(tags: readonly string[], indent: string, newline: string): string {
+  return [
+    `${indent}/--`,
+    `${indent}%%handwave`,
+    `${indent}tags:`,
+    `${indent}  ${tags.join(", ")}`,
+    `${indent}-/`,
+    ""
+  ].join(newline);
+}
+
+interface HandwaveFieldRange {
+  start: number;
+  end: number;
+  prefix: string;
+}
+
+function findHandwaveFieldRange(
+  text: string,
+  docStart: number,
+  docCloseStart: number,
+  key: string
+): HandwaveFieldRange | undefined {
+  let offset = docStart;
+  let fieldStart: number | undefined;
+  let fieldPrefix = "";
+
+  while (offset < docCloseStart) {
+    const { line, nextOffset } = sourceLineAt(text, offset);
+    const prefix = handwaveLinePrefix(line);
+    const cleaned = line.slice(prefix.length);
+    const keyValue = /^([A-Za-z0-9_.-]+):(?:\s*(.*))?$/.exec(cleaned);
+
+    if (keyValue) {
+      if (fieldStart !== undefined) {
+        return { start: fieldStart, end: offset, prefix: fieldPrefix };
+      }
+
+      if (keyValue[1] === key) {
+        fieldStart = offset;
+        fieldPrefix = prefix;
+      }
+    }
+
+    offset = nextOffset;
+  }
+
+  if (fieldStart === undefined) {
+    return undefined;
+  }
+
+  return { start: fieldStart, end: lineStartOffset(text, docCloseStart), prefix: fieldPrefix };
+}
+
+function defaultHandwaveFieldPrefix(text: string, docStart: number, docCloseStart: number): string {
+  let offset = docStart;
+  while (offset < docCloseStart) {
+    const { line, nextOffset } = sourceLineAt(text, offset);
+    const prefix = handwaveLinePrefix(line);
+    const cleaned = line.slice(prefix.length).trim();
+    if (/^[A-Za-z0-9_.-]+:/.test(cleaned)) {
+      return prefix;
+    }
+    offset = nextOffset;
+  }
+  return "";
+}
+
+function handwaveFieldBlock(prefix: string, key: string, value: string, newline: string): string {
+  const valueLines = value.split(/\r?\n/).map((line) => `${prefix}  ${line}`);
+  return [`${prefix}${key}:`, ...valueLines, ""].join(newline);
+}
+
+function handwaveDocCloseStart(text: string, docStart: number, docEnd: number): number {
+  const closeRelative = text.slice(docStart, docEnd).lastIndexOf("-/");
+  return closeRelative >= 0 ? docStart + closeRelative : docEnd;
+}
+
+function sourceLineAt(text: string, offset: number): { line: string; nextOffset: number } {
+  const newline = text.indexOf("\n", offset);
+  const end = newline >= 0 ? newline : text.length;
+  const line = text.slice(offset, end).replace(/\r$/, "");
+  return { line, nextOffset: newline >= 0 ? newline + 1 : text.length };
+}
+
+function lineStartOffset(text: string, offset: number): number {
+  return text.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+}
+
+function handwaveLinePrefix(line: string): string {
+  return /^(\s*[-*]?\s?)/.exec(line)?.[1] ?? "";
+}
+
+function documentNewline(document: vscode.TextDocument): "\n" | "\r\n" {
+  return document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
 }
 
 function comparePrioritizedLeanDeclarations(

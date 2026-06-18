@@ -1,5 +1,5 @@
 import { HandwaveIndex } from "./index";
-import { parseArticleDocument, parseLeanDocument, parseTarget } from "./parser";
+import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget } from "./parser";
 import { LeanDeclaration } from "./types";
 
 interface RenderOptions {
@@ -238,6 +238,31 @@ function renderHtmlShell(
     .declaration-label {
       display: inline-block;
       position: relative;
+    }
+    .milestone-control {
+      align-items: center;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      color: var(--vscode-button-secondaryForeground, currentColor);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      height: 1.55em;
+      justify-content: center;
+      margin-right: 4px;
+      padding: 0;
+      width: 1.55em;
+    }
+    .milestone-control:hover {
+      background: var(--vscode-button-secondaryHoverBackground, var(--surface));
+      border-color: var(--border);
+    }
+    .milestone-control-active {
+      color: var(--vscode-editorWarning-foreground, #9a6700);
+    }
+    .milestone-control-inactive {
+      color: var(--muted);
     }
     .source-popover {
       background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
@@ -554,6 +579,44 @@ ${body}
     ${focusScript}
   });
 
+  function toggleHandwaveTag(control) {
+    const handwaveTarget = control.dataset.handwaveTarget;
+    const tag = control.dataset.toggleTag;
+    if (!handwaveTarget || !tag) {
+      return;
+    }
+
+    handwaveVscode?.postMessage({ type: "toggleTag", target: handwaveTarget, tag });
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : undefined;
+    const control = target?.closest("[data-toggle-tag][data-handwave-target]");
+    if (!control) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    toggleHandwaveTag(control);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : undefined;
+    const control = target?.closest("[data-toggle-tag][data-handwave-target]");
+    if (!control) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    toggleHandwaveTag(control);
+  });
+
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : undefined;
     const link = target?.closest("a[data-handwave-target]");
@@ -837,7 +900,7 @@ function renderTheoremView(
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName)}`, proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName, renderMilestoneTagControl(declaration, target))}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
@@ -943,6 +1006,15 @@ function declarationLabel(baseLabel: string, declaration: LeanDeclaration): stri
   return `${escapeHtml(baseLabel)} (${escapeHtml(displayName)}).`;
 }
 
+function renderMilestoneTagControl(declaration: LeanDeclaration, target: string): string {
+  const active = hasHandwaveTag(declaration.doc, "milestone");
+  const escapedTarget = escapeHtml(target);
+  const label = active ? "Remove milestone tag" : "Add milestone tag";
+  const symbol = active ? "★" : "☆";
+  const cssClass = active ? "milestone-control-active" : "milestone-control-inactive";
+  return `<button class="milestone-control ${cssClass}" type="button" data-toggle-tag="milestone" data-handwave-target="${escapedTarget}" aria-pressed="${String(active)}" title="${label}" aria-label="${label}">${symbol}</button>`;
+}
+
 function renderDeclarationLabel(
   label: string,
   target: string,
@@ -950,13 +1022,14 @@ function renderDeclarationLabel(
   editorHref: (target: string) => string,
   controlsLabel: string,
   popoverBodyHtml = "",
-  sourceName?: string
+  sourceName?: string,
+  leadingControlsHtml = ""
 ): string {
   const href = escapeHtml(commandHref(target));
   const editorLinkHref = escapeHtml(editorHref(target));
   const escapedTarget = escapeHtml(target);
   const sourceLabel = escapeHtml(sourceName ?? declarationSourceLabel(target));
-  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
+  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${leadingControlsHtml}${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
 }
 
 function renderProofLabel(): string {

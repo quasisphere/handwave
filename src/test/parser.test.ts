@@ -297,6 +297,21 @@ test("parses Handwave definitions", () => {
   assert.equal(definition?.leanProof, "n + n");
 });
 
+test("keeps let assignments inside Lean theorem statements", () => {
+  const declarations = parseLeanDocument(`/--
+%%handwave
+statement:
+  A theorem statement can contain a let expression.
+-/
+theorem let_statement :
+    (let x := 1; x = 1) := by
+  rfl
+`, "/workspace/LetStatement.lean");
+
+  assert.match(declarations[0].leanStatement, /let x := 1; x = 1/);
+  assert.equal(declarations[0].leanProof, "by\n  rfl");
+});
+
 test("parses article headings, links, and includes", () => {
   const article = parseArticleDocument(articleText, "/workspace/natural-numbers.hw.md");
 
@@ -770,6 +785,8 @@ test("renders Lean files as navigable declaration previews", () => {
   assert.match(html, /<section class="definition-view" id="lean-double" data-target="lean:double">/);
   assert.match(html, /focusHandwaveTarget\("lean-my_add_assoc"\)/);
   assert.match(html, /message\.type !== "replaceContent"/);
+  assert.match(html, /const viewModes = collectHandwaveViewModes\(content\)/);
+  assert.match(html, /restoreHandwaveViewModes\(content, viewModes\)/);
 });
 
 test("renders theorem targets as reduced dependency views", () => {

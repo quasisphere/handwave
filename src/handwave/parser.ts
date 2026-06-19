@@ -503,13 +503,13 @@ function namespaceAt(searchableText: string, offset: number): string[] {
 }
 
 function splitLeanDeclaration(declarationText: string): { leanStatement: string; leanProof?: string } {
-  const proofStart = declarationText.search(/\s:=\s*(by\b)?/);
+  const proofStart = findLeanProofDelimiter(declarationText);
   if (proofStart < 0) {
     return { leanStatement: declarationText };
   }
 
   const prefix = declarationText.slice(0, proofStart).trimEnd();
-  const proofMarker = declarationText.slice(proofStart).match(/^\s:=\s*/);
+  const proofMarker = declarationText.slice(proofStart).match(/^\s*:=\s*/);
   const proofOffset = proofStart + (proofMarker?.[0].length ?? 0);
   const proof = declarationText.slice(proofOffset).trim();
 
@@ -517,4 +517,68 @@ function splitLeanDeclaration(declarationText: string): { leanStatement: string;
     leanStatement: prefix,
     leanProof: proof || undefined
   };
+}
+
+function findLeanProofDelimiter(declarationText: string): number {
+  const searchableText = blankLeanCommentsAndStrings(declarationText);
+  let depth = 0;
+  let firstTermProof = -1;
+
+  for (let index = 0; index < searchableText.length; index++) {
+    const char = searchableText[index];
+    if (isLeanOpeningDelimiter(char)) {
+      depth++;
+      continue;
+    }
+    if (isLeanClosingDelimiter(char)) {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0 || !searchableText.startsWith(":=", index)) {
+      continue;
+    }
+    if (
+      index > 0 &&
+      !/\s/.test(searchableText[index - 1])
+    ) {
+      continue;
+    }
+
+    const afterAssignment = searchableText.slice(index + 2).match(/^\s*(by\b)?/);
+    if (!afterAssignment) {
+      continue;
+    }
+    if (firstTermProof < 0) {
+      firstTermProof = index;
+    }
+    if (afterAssignment[1]) {
+      return index;
+    }
+  }
+
+  return firstTermProof;
+}
+
+function isLeanOpeningDelimiter(char: string): boolean {
+  return (
+    char === "(" ||
+    char === "[" ||
+    char === "{" ||
+    char === "⟨" ||
+    char === "⦃" ||
+    char === "⟦" ||
+    char === "⟪"
+  );
+}
+
+function isLeanClosingDelimiter(char: string): boolean {
+  return (
+    char === ")" ||
+    char === "]" ||
+    char === "}" ||
+    char === "⟩" ||
+    char === "⦄" ||
+    char === "⟧" ||
+    char === "⟫"
+  );
 }

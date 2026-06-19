@@ -575,6 +575,55 @@ ${body}
     }
   }
 
+  function handwaveSectionKey(section) {
+    const target = section.closest("[data-target]")?.dataset.target || "";
+    const part = section.dataset.section || "";
+    return target && part ? target + "::" + part : "";
+  }
+
+  function collectHandwaveViewModes(root) {
+    const modes = {};
+    for (const section of root.querySelectorAll("[data-section][data-mode]")) {
+      const key = handwaveSectionKey(section);
+      if (!key) {
+        continue;
+      }
+      modes[key] = {
+        mode: section.dataset.mode || "text",
+        lastMode: section.dataset.lastMode || ""
+      };
+    }
+    return modes;
+  }
+
+  function applyHandwaveSectionMode(section, nextMode, lastMode) {
+    section.dataset.mode = nextMode;
+    if (lastMode) {
+      section.dataset.lastMode = lastMode;
+    } else if (nextMode !== "collapsed") {
+      section.dataset.lastMode = nextMode;
+    }
+
+    for (const control of section.querySelectorAll("[data-set-mode]")) {
+      control.setAttribute("aria-pressed", String(control.dataset.setMode === nextMode));
+    }
+    for (const control of section.querySelectorAll("[data-toggle-collapsed]")) {
+      control.setAttribute("aria-expanded", String(nextMode !== "collapsed"));
+      control.textContent = nextMode === "collapsed" ? "▸" : "▾";
+      control.setAttribute("aria-label", nextMode === "collapsed" ? "Expand proof" : "Collapse proof");
+    }
+  }
+
+  function restoreHandwaveViewModes(root, modes) {
+    for (const section of root.querySelectorAll("[data-section][data-mode]")) {
+      const mode = modes[handwaveSectionKey(section)];
+      if (!mode) {
+        continue;
+      }
+      applyHandwaveSectionMode(section, mode.mode, mode.lastMode);
+    }
+  }
+
   window.addEventListener("load", () => {
     ${focusScript}
   });
@@ -672,7 +721,9 @@ ${body}
       return;
     }
 
+    const viewModes = collectHandwaveViewModes(content);
     content.innerHTML = nextContent.innerHTML;
+    restoreHandwaveViewModes(content, viewModes);
     if (nextDocument.title) {
       document.title = nextDocument.title;
     }
@@ -693,18 +744,10 @@ ${body}
     }
 
     const nextMode = button.dataset.setMode;
-    section.dataset.mode = nextMode;
-    for (const control of section.querySelectorAll("[data-set-mode]")) {
-      control.setAttribute("aria-pressed", String(control.dataset.setMode === nextMode));
+    if (!nextMode) {
+      return;
     }
-    for (const control of section.querySelectorAll("[data-toggle-collapsed]")) {
-      control.setAttribute("aria-expanded", String(nextMode !== "collapsed"));
-      control.textContent = nextMode === "collapsed" ? "▸" : "▾";
-      control.setAttribute("aria-label", nextMode === "collapsed" ? "Expand proof" : "Collapse proof");
-    }
-    if (nextMode !== "collapsed") {
-      section.dataset.lastMode = nextMode;
-    }
+    applyHandwaveSectionMode(section, nextMode);
   });
 
   document.addEventListener("click", (event) => {
@@ -720,16 +763,8 @@ ${body}
     }
 
     const nextMode = section.dataset.mode === "collapsed" ? (section.dataset.lastMode || "text") : "collapsed";
-    if (section.dataset.mode !== "collapsed") {
-      section.dataset.lastMode = section.dataset.mode || "text";
-    }
-    section.dataset.mode = nextMode;
-    button.setAttribute("aria-expanded", String(nextMode !== "collapsed"));
-    button.textContent = nextMode === "collapsed" ? "▸" : "▾";
-    button.setAttribute("aria-label", nextMode === "collapsed" ? "Expand proof" : "Collapse proof");
-    for (const control of section.querySelectorAll("[data-set-mode]")) {
-      control.setAttribute("aria-pressed", String(control.dataset.setMode === nextMode));
-    }
+    const lastMode = section.dataset.mode !== "collapsed" ? (section.dataset.mode || "text") : section.dataset.lastMode;
+    applyHandwaveSectionMode(section, nextMode, lastMode);
   });
 </script>
 </body>

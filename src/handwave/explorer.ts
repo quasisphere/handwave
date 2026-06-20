@@ -41,7 +41,8 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
 
   constructor(
     private readonly payloadProvider: () => TheoremExplorerPayload,
-    private readonly openPreviewTarget: (target: string) => Promise<void>
+    private readonly openPreviewTarget: (target: string) => Promise<void>,
+    private readonly toggleTag: (target: string, tag: string) => Promise<void>
   ) {}
 
   dispose(): void {
@@ -66,9 +67,13 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
     if (!message || typeof message !== "object") {
       return;
     }
-    const data = message as { type?: unknown; target?: unknown };
+    const data = message as { type?: unknown; target?: unknown; tag?: unknown };
     if (data.type === "openPreview" && typeof data.target === "string") {
       await this.openPreviewTarget(data.target);
+      return;
+    }
+    if (data.type === "toggleTag" && typeof data.target === "string" && typeof data.tag === "string") {
+      await this.toggleTag(data.target, data.tag);
     }
   }
 }
@@ -364,6 +369,9 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       min-height: 100%;
       position: relative;
     }
+    .graph-canvas-measuring {
+      visibility: hidden;
+    }
     .graph-edges {
       inset: 0;
       overflow: visible;
@@ -416,15 +424,29 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     .star-on {
       color: var(--warning);
     }
+    .preview-milestone-control {
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+      margin: 0 0.25em 0 0.1em;
+      padding: 0 2px;
+      vertical-align: baseline;
+    }
+    .preview-milestone-control:hover {
+      color: var(--warning);
+    }
+    .preview-milestone-control-active {
+      color: var(--warning);
+    }
     .theorem-node-text {
       min-width: 0;
     }
     .theorem-title,
     .theorem-module {
       display: block;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
     }
     .theorem-title {
       font-weight: 600;
@@ -437,6 +459,11 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     .theorem-module {
       color: var(--muted);
       font-size: 0.88em;
+      line-height: 1.15;
+      overflow: visible;
+      text-overflow: clip;
+      white-space: normal;
+      word-break: break-word;
     }
     .preview {
       border-top: 1px solid var(--border);
@@ -627,6 +654,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     let suggestionsOpen = false;
     let suggestionItems = [];
     let activeSuggestionIndex = -1;
+    let graphLayoutVersion = 0;
 
     const search = document.getElementById("search");
     const suggestions = document.getElementById("suggestions");
@@ -743,11 +771,15 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       const roots = rootTheorems();
       stats.textContent = graphStatsText(roots);
       if (roots.length === 0) {
+        graphLayoutVersion++;
         graph.innerHTML = '<div class="graph-empty">No theorems.</div>';
         renderPreview();
         return;
       }
-      graph.innerHTML = renderGraph(layoutGraph(roots, theoremMap), theoremMap);
+      const layout = layoutGraph(roots, theoremMap);
+      const version = ++graphLayoutVersion;
+      graph.innerHTML = renderGraph(layout, theoremMap);
+      window.requestAnimationFrame(() => applyMeasuredGraphLayout(layout, version));
       renderPreview();
     }
 
@@ -787,37 +819,27 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       }
 
       const nodeWidth = 208;
-      const baseNodeHeight = 46;
       const columnGap = 86;
       const rowGap = 18;
       const maxColumn = Math.max(0, ...[...nodes.values()].map((node) => node.column));
-      let maxColumnHeight = baseNodeHeight;
+      const orderedNodes = [];
 
-      for (const [column, list] of columns) {
-        let y = 0;
+      for (const [column, list] of [...columns.entries()].sort((first, second) => first[0] - second[0])) {
         for (const node of list) {
-          const theorem = theoremMap.get(node.name);
-          node.height = graphNodeHeight(theorem, baseNodeHeight);
           node.x = column * (nodeWidth + columnGap);
-          node.y = y;
-          y += node.height + rowGap;
+          node.y = 0;
+          orderedNodes.push(node);
         }
-        maxColumnHeight = Math.max(maxColumnHeight, y - rowGap);
       }
 
       return {
         edges: [...edges.values()],
-        height: maxColumnHeight + 12,
-        nodes: [...nodes.values()],
+        height: 80,
+        nodes: orderedNodes,
         nodeWidth,
+        rowGap,
         width: (maxColumn + 1) * (nodeWidth + columnGap) - columnGap + 16
       };
-    }
-
-    function graphNodeHeight(theorem, baseNodeHeight) {
-      const title = theorem?.displayName || theorem?.shortName || "";
-      const titleLineCount = Math.max(1, Math.ceil(title.length / 20));
-      return baseNodeHeight + (titleLineCount - 1) * 16;
     }
 
     function visitGraphNode(name, theoremMap, nodes, edges, column, path) {
@@ -848,15 +870,60 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
 
     function renderGraph(layout, theoremMap) {
       const highlight = graphHighlight(layout.edges, selectedName);
+      return '<div class="graph-canvas graph-canvas-measuring" style="width: ' + String(layout.width) + 'px; height: ' + String(layout.height) + 'px;">' +
+        '<svg class="graph-edges" width="' + String(layout.width) + '" height="' + String(layout.height) + '" aria-hidden="true"></svg>' +
+        layout.nodes.map((node, index) => renderNode(node, theoremMap, layout, highlight, index)).join("") +
+        '</div>';
+    }
+
+    function applyMeasuredGraphLayout(layout, version) {
+      if (version !== graphLayoutVersion) {
+        return;
+      }
+      const canvas = graph.querySelector(".graph-canvas");
+      const svg = graph.querySelector(".graph-edges");
+      if (!canvas || !svg) {
+        return;
+      }
+
+      const columns = new Map();
+      layout.nodes.forEach((node, index) => {
+        const element = canvas.querySelector('[data-graph-node-index="' + String(index) + '"]');
+        node.element = element;
+        node.height = element ? Math.ceil(element.getBoundingClientRect().height) : 46;
+        const list = columns.get(node.column) || [];
+        list.push(node);
+        columns.set(node.column, list);
+      });
+
+      let maxColumnHeight = 0;
+      for (const list of columns.values()) {
+        let y = 0;
+        for (const node of list) {
+          node.y = y;
+          if (node.element) {
+            node.element.style.left = String(node.x) + "px";
+            node.element.style.top = String(node.y) + "px";
+          }
+          y += node.height + layout.rowGap;
+        }
+        maxColumnHeight = Math.max(maxColumnHeight, Math.max(0, y - layout.rowGap));
+      }
+
+      layout.height = maxColumnHeight + 12;
+      canvas.style.width = String(layout.width) + "px";
+      canvas.style.height = String(layout.height) + "px";
+      svg.setAttribute("width", String(layout.width));
+      svg.setAttribute("height", String(layout.height));
+      svg.innerHTML = renderGraphEdges(layout, graphHighlight(layout.edges, selectedName));
+      canvas.classList.remove("graph-canvas-measuring");
+    }
+
+    function renderGraphEdges(layout, highlight) {
       const edges = [...layout.edges].sort((first, second) =>
         Number(highlight.edges.has(graphEdgeKey(first))) - Number(highlight.edges.has(graphEdgeKey(second)))
       );
-      return '<div class="graph-canvas" style="width: ' + String(layout.width) + 'px; height: ' + String(layout.height) + 'px;">' +
-        '<svg class="graph-edges" width="' + String(layout.width) + '" height="' + String(layout.height) + '" aria-hidden="true">' +
-        edges.map((edge) => renderEdge(edge, layout, highlight)).join("") +
-        '</svg>' +
-        layout.nodes.map((node) => renderNode(node, theoremMap, layout, highlight)).join("") +
-        '</div>';
+      return edges.map((edge) => renderEdge(edge, layout, highlight)).join("");
     }
 
     function graphHighlight(edges, selectedName) {
@@ -915,7 +982,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         ', ' + String(endX) + ' ' + String(endY) + '"></path>';
     }
 
-    function renderNode(node, theoremMap, layout, highlight) {
+    function renderNode(node, theoremMap, layout, highlight, index) {
       const theorem = theoremMap.get(node.name);
       if (!theorem) {
         return "";
@@ -925,8 +992,9 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       const star = theorem.milestone ? "★" : "☆";
       const starClass = theorem.milestone ? "star star-on" : "star";
       return '<button class="graph-node' + selected + dependency + '" type="button" data-select-theorem="' + html(theorem.name) +
+        '" data-graph-node-index="' + String(index) +
         '" style="left: ' + String(node.x) + 'px; top: ' + String(node.y) +
-        'px; width: ' + String(layout.nodeWidth) + 'px; height: ' + String(node.height) + 'px;">' +
+        'px; width: ' + String(layout.nodeWidth) + 'px;">' +
         (theorem.statusHtml || '') +
         '<span class="' + starClass + '">' + star + '</span>' +
         '<span class="theorem-node-text"><span class="theorem-title">' + html(theorem.displayName) + '</span>' +
@@ -1106,8 +1174,30 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         preview.innerHTML = '<p class="preview-empty">Select a theorem.</p>';
         return;
       }
-      preview.innerHTML = theorem.previewHtml + renderViewerInfo(theorem);
+      preview.innerHTML = injectPreviewMilestoneControl(theorem.previewHtml, theorem) + renderViewerInfo(theorem);
       window.MathJax?.typesetPromise?.([preview]).catch(() => undefined);
+    }
+
+    function injectPreviewMilestoneControl(previewHtml, theorem) {
+      const marker = '<span class="declaration-label"';
+      const index = previewHtml.indexOf(marker);
+      const control = renderPreviewMilestoneControl(theorem);
+      if (index < 0) {
+        return control + previewHtml;
+      }
+      return previewHtml.slice(0, index) + control + previewHtml.slice(index);
+    }
+
+    function renderPreviewMilestoneControl(theorem) {
+      const active = Boolean(theorem.milestone);
+      const label = active ? "Remove milestone tag" : "Add milestone tag";
+      const cssClass = active
+        ? "preview-milestone-control preview-milestone-control-active"
+        : "preview-milestone-control preview-milestone-control-inactive";
+      return '<button class="' + cssClass + '" type="button" data-toggle-tag="milestone" data-handwave-target="' + html(theorem.target) +
+        '" aria-pressed="' + String(active) + '" title="' + html(label) + '" aria-label="' + html(label) + '">' +
+        (active ? "★" : "☆") +
+        '</button>';
     }
 
     function renderViewerInfo(theorem) {
@@ -1265,6 +1355,16 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
 
     preview.addEventListener("click", (event) => {
       const target = event.target instanceof Element ? event.target : undefined;
+      const tagButton = target?.closest("[data-toggle-tag]");
+      if (tagButton) {
+        event.preventDefault();
+        const tag = tagButton.dataset.toggleTag;
+        const handwaveTarget = tagButton.dataset.handwaveTarget;
+        if (tag && handwaveTarget) {
+          vscode?.postMessage({ type: "toggleTag", target: handwaveTarget, tag });
+        }
+        return;
+      }
       const link = target?.closest("a[data-handwave-target]");
       if (!link) {
         return;

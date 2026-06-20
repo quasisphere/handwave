@@ -121,7 +121,8 @@ class HandwaveController
   constructor(private readonly context: vscode.ExtensionContext) {
     this.theoremExplorerProvider = new HandwaveTheoremExplorerProvider(
       () => this.theoremExplorerPayload(),
-      (target) => this.openPreviewTarget(target)
+      (target) => this.openPreviewTarget(target),
+      (target, tag) => this.toggleLeanDeclarationTag(target, tag)
     );
     const articleSelector: vscode.DocumentSelector = [
       { scheme: "file", language: "handwave-article" },

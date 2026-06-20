@@ -1211,7 +1211,7 @@ function renderModeControls(ariaLabel: string): string {
   return `<span class="view-switch" role="group" aria-label="${escapeHtml(ariaLabel)}"><button class="mode-control" type="button" data-set-mode="text" aria-pressed="true">text</button><button class="mode-control" type="button" data-set-mode="lean" aria-pressed="false">lean</button></span>`;
 }
 
-function renderCheckStatus(status: LeanCheckStatus): string {
+export function renderCheckStatus(status: LeanCheckStatus): string {
   if (!status) {
     return `<span class="check-status check-status-pending" title="Lean status is still being inferred." aria-label="Lean status pending">…</span>`;
   }

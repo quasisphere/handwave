@@ -1,6 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { HandwaveIndex } from "../handwave/index";
+import { buildTheoremExplorerPayload } from "../handwave/explorer";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
@@ -468,6 +469,50 @@ test("renders theorem previews without hover popovers for explorer panes", () =>
   assert.match(html, /Addition of natural numbers is associative/);
   assert.doesNotMatch(html, /source-popover/);
   assert.doesNotMatch(html, /milestone-control/);
+});
+
+test("builds theorem explorer relation links and status badges", () => {
+  const declarations = parseLeanDocument(`/--
+%%handwave
+name:
+  Base theorem with a deliberately long display name
+statement:
+  The base theorem is true.
+proof:
+  It is immediate.
+-/
+theorem base_theorem : True := by
+  trivial
+
+/--
+%%handwave
+name:
+  Derived theorem
+statement:
+  The derived theorem follows from the base theorem.
+proof:
+  Apply the base theorem.
+-/
+theorem derived_theorem : True := by
+  exact base_theorem
+`, "/workspace/Explorer.lean");
+  const article = parseArticleDocument([
+    "# Explorer Notes",
+    "",
+    "[the base theorem](lean:base_theorem)",
+    "",
+    "@include{lean:base_theorem.statement}"
+  ].join("\n"), "/workspace/notes/explorer.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
+    ["base_theorem", leanStatus(true, "Lean checked for explorer test.")]
+  ]));
+  const payload = buildTheoremExplorerPayload(index, declarations, ["/workspace"]);
+  const base = payload.theorems.find((theorem) => theorem.name === "base_theorem");
+
+  assert.deepEqual(base?.dependents.map((link) => link.target), ["lean:derived_theorem"]);
+  assert.deepEqual(base?.references.map((link) => link.target), ["article:notes/explorer.hw.md"]);
+  assert.equal(base?.references[0]?.label, "notes/explorer.hw.md");
+  assert.match(base?.statusHtml ?? "", /class="check-status check-status-checked"[^>]*>✓<\/span>/);
 });
 
 test("renders theorem check status supplied by Lean diagnostics", () => {

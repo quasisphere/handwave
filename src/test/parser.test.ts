@@ -4,7 +4,12 @@ import { HandwaveIndex } from "../handwave/index";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
-import { leanDeclarationAnchorId, renderArticleHtml, renderLeanDocumentHtml } from "../handwave/renderer";
+import {
+  leanDeclarationAnchorId,
+  renderArticleHtml,
+  renderLeanDeclarationPreviewHtml,
+  renderLeanDocumentHtml
+} from "../handwave/renderer";
 
 const leanText = `/--
 %%handwave
@@ -446,6 +451,23 @@ theorem untagged_theorem : True := by
   assert.match(html, inactiveMilestoneStarPattern);
   assert.match(html, /<button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:untagged_theorem" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button><span class="view-switch" role="group" aria-label="Theorem view">/);
   assert.match(html, /postMessage\(\{ type: "toggleTag", target: handwaveTarget, tag \}\)/);
+});
+
+test("renders theorem previews without hover popovers for explorer panes", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  const html = renderLeanDeclarationPreviewHtml(
+    declarations[0],
+    index,
+    (target) => `command:${target}`,
+    (target) => `editor:${target}`
+  );
+
+  assert.match(html, /<section class="theorem-view"/);
+  assert.match(html, /data-handwave-target="lean:my_add_assoc"/);
+  assert.match(html, /Addition of natural numbers is associative/);
+  assert.doesNotMatch(html, /source-popover/);
+  assert.doesNotMatch(html, /milestone-control/);
 });
 
 test("renders theorem check status supplied by Lean diagnostics", () => {

@@ -182,6 +182,9 @@ Editor UI:
 - Click declaration labels, dependency tree entries, and article links to
   navigate within the preview.
 - Use the source links in declaration popovers to jump back to the Lean source.
+- Use the Handwave Activity Bar icon to open the theorem explorer. It defaults
+  to milestone-tagged theorems, supports module or theorem search, and shows a
+  selected theorem preview below the dependency tree.
 
 Lean editor features:
 

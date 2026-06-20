@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { spawn } from "node:child_process";
 import { collectDiagnostics, DiagnosticIssue } from "./handwave/diagnostics";
+import { buildTheoremExplorerPayload, HandwaveTheoremExplorerProvider } from "./handwave/explorer";
 import { HandwaveIndex } from "./handwave/index";
 import { parseLeanAxiomOutput } from "./handwave/leanAxiom";
 import { containsPosition } from "./handwave/position";
@@ -88,6 +89,7 @@ class HandwaveController
   private readonly diagnostics = vscode.languages.createDiagnosticCollection("handwave");
   private readonly codeLensEmitter = new vscode.EventEmitter<void>();
   private readonly leanProcessStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  private readonly theoremExplorerProvider: HandwaveTheoremExplorerProvider;
   private readonly previewPanels = new Map<string, HandwavePreviewState>();
   private readonly leanDiagnosticUrisSeen = new Set<string>();
   private readonly leanDiagnosticUrisRequested = new Set<string>();
@@ -117,6 +119,10 @@ class HandwaveController
   readonly onDidChangeCodeLenses = this.codeLensEmitter.event;
 
   constructor(private readonly context: vscode.ExtensionContext) {
+    this.theoremExplorerProvider = new HandwaveTheoremExplorerProvider(
+      () => this.theoremExplorerPayload(),
+      (target) => this.openPreviewTarget(target)
+    );
     const articleSelector: vscode.DocumentSelector = [
       { scheme: "file", language: "handwave-article" },
       { scheme: "file", pattern: "**/*.hw.md" },
@@ -133,6 +139,8 @@ class HandwaveController
       this.diagnostics,
       this.codeLensEmitter,
       this.leanProcessStatusBar,
+      this.theoremExplorerProvider,
+      vscode.window.registerWebviewViewProvider("handwave.theoremExplorer", this.theoremExplorerProvider),
       vscode.languages.registerDocumentLinkProvider(articleSelector, this),
       vscode.languages.registerHoverProvider(allSelector, this),
       vscode.languages.registerDefinitionProvider(articleSelector, this),
@@ -340,6 +348,7 @@ class HandwaveController
       this.articles = [];
       this.index = new HandwaveIndex("", [], []);
       this.diagnostics.clear();
+      this.refreshTheoremExplorer();
       return;
     }
 
@@ -383,6 +392,7 @@ class HandwaveController
 
     this.isIndexing = false;
     this.codeLensEmitter.fire();
+    this.refreshTheoremExplorer();
     void this.triggerLeanDiagnosticsForOpenPreviews();
     await this.refreshPreviews();
 
@@ -484,6 +494,16 @@ class HandwaveController
       this.articles,
       this.currentLeanCheckStatuses(this.declarations)
     );
+    this.refreshTheoremExplorer();
+  }
+
+  private theoremExplorerPayload() {
+    const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    return buildTheoremExplorerPayload(this.index, this.declarations, workspaceRoots);
+  }
+
+  private refreshTheoremExplorer(): void {
+    this.theoremExplorerProvider.refresh();
   }
 
   private currentLeanCheckStatuses(declarations: readonly LeanDeclaration[]): Map<string, LeanDeclarationCheckStatus> {

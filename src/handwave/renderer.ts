@@ -10,6 +10,12 @@ interface RenderOptions {
   editorHref?: (target: string) => string;
 }
 
+interface DeclarationRenderOptions {
+  popovers?: boolean;
+  milestoneControls?: boolean;
+  dependencyTree?: boolean;
+}
+
 type LeanCheckStatus = ReturnType<HandwaveIndex["checkStatusForLean"]>;
 
 interface DependencyTreeNode {
@@ -98,6 +104,26 @@ export function renderLeanDocumentHtml(
 
 export function leanDeclarationAnchorId(name: string): string {
   return `lean-${name.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+}
+
+export function renderLeanDeclarationPreviewHtml(
+  declaration: LeanDeclaration,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string,
+  editorHref: (target: string) => string
+): string {
+  return renderDeclarationPackage(
+    declaration,
+    `lean:${declaration.name}`,
+    commandHref,
+    editorHref,
+    index,
+    {
+      dependencyTree: false,
+      milestoneControls: false,
+      popovers: false
+    }
+  );
 }
 
 function renderHtmlShell(
@@ -907,13 +933,14 @@ function renderDeclarationPackage(
   target: string,
   commandHref: (target: string) => string,
   editorHref: (target: string) => string,
-  index: HandwaveIndex
+  index: HandwaveIndex,
+  options: DeclarationRenderOptions = {}
 ): string {
   if (isTheoremLike(declaration)) {
-    return renderTheoremView(declaration, target, commandHref, editorHref, index);
+    return renderTheoremView(declaration, target, commandHref, editorHref, index, options);
   }
 
-  return renderDefinitionView(declaration, target, commandHref, editorHref);
+  return renderDefinitionView(declaration, target, commandHref, editorHref, options);
 }
 
 function renderTheoremView(
@@ -921,7 +948,8 @@ function renderTheoremView(
   target: string,
   commandHref: (target: string) => string,
   editorHref: (target: string) => string,
-  index: HandwaveIndex
+  index: HandwaveIndex,
+  options: DeclarationRenderOptions = {}
 ): string {
   const proseStatement =
     declaration.doc?.fields.statement ??
@@ -930,16 +958,21 @@ function renderTheoremView(
   const leanProof = declaration.leanProof ?? declaration.statement;
   const label = declarationLabel("Theorem", declaration);
   const status = index.checkStatusForLean(declaration.name);
-  const dependencyTree = renderDependencyTree(declaration.name, index, commandHref);
+  const dependencyTree = options.dependencyTree === false
+    ? ""
+    : renderDependencyTree(declaration.name, index, commandHref);
+  const milestoneControl = options.milestoneControls === false
+    ? ""
+    : renderMilestoneTagControl(declaration, target);
 
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName, renderMilestoneTagControl(declaration, target))}`, proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName, milestoneControl, options)}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
-        <div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾</button>${renderProofLabel()} <div class="proof-content">
+        <div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾</button>${renderProofLabel(options)} <div class="proof-content">
           <div class="proof-body">
             <div class="prose-content">${renderProofParagraphs(proseProof, commandHref)}</div>
             ${renderLeanBlock(leanProof)}
@@ -954,7 +987,8 @@ function renderDefinitionView(
   declaration: LeanDeclaration,
   target: string,
   commandHref: (target: string) => string,
-  editorHref: (target: string) => string
+  editorHref: (target: string) => string,
+  options: DeclarationRenderOptions = {}
 ): string {
   const proseStatement =
     declaration.doc?.fields.statement ??
@@ -964,7 +998,7 @@ function renderDefinitionView(
   return compactHtml(`
     <section class="definition-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       <div class="definition-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, editorHref, "Definition view", "", declaration.sourceName), proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, editorHref, "Definition view", "", declaration.sourceName, "", options), proseStatement, commandHref)}
         ${renderLeanBlock(declaration.statement)}
       </div>
     </section>
@@ -1058,16 +1092,23 @@ function renderDeclarationLabel(
   controlsLabel: string,
   popoverBodyHtml = "",
   sourceName?: string,
-  leadingControlsHtml = ""
+  leadingControlsHtml = "",
+  options: DeclarationRenderOptions = {}
 ): string {
   const href = escapeHtml(commandHref(target));
   const editorLinkHref = escapeHtml(editorHref(target));
   const escapedTarget = escapeHtml(target);
   const sourceLabel = escapeHtml(sourceName ?? declarationSourceLabel(target));
+  if (options.popovers === false) {
+    return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong></span>`;
+  }
   return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${leadingControlsHtml}${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
 }
 
-function renderProofLabel(): string {
+function renderProofLabel(options: DeclarationRenderOptions = {}): string {
+  if (options.popovers === false) {
+    return `<span class="declaration-label"><strong>Proof.</strong></span>`;
+  }
   return `<span class="declaration-label"><strong>Proof.</strong><span class="source-popover"><span class="source-popover-row">${renderModeControls("Proof view")}</span></span></span>`;
 }
 

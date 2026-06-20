@@ -15,10 +15,29 @@
     "onStartupFinished",
     "onCommand:handwave.rebuildIndex",
     "onCommand:handwave.openArticlePreview",
-    "onCommand:handwave.showBacklinks"
+    "onCommand:handwave.showBacklinks",
+    "onView:handwave.theoremExplorer"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "handwave",
+          "title": "Handwave",
+          "icon": "media/handwave.svg"
+        }
+      ]
+    },
+    "views": {
+      "handwave": [
+        {
+          "id": "handwave.theoremExplorer",
+          "name": "Theorem Explorer",
+          "type": "webview"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "handwave.rebuildIndex",

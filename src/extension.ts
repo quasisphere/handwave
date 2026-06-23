@@ -96,12 +96,15 @@ class HandwaveController
   private readonly leanAxiomCheckStatuses = new Map<string, LeanDeclarationCheckStatus>();
   private readonly leanAxiomCheckQueue = new Map<string, LeanAxiomCheckQueueItem>();
   private readonly leanAxiomChecksRunning = new Set<string>();
+  private readonly theoremExplorerVisibleNames = new Set<string>();
+  private theoremExplorerVisibleKey = "";
   private declarations: LeanDeclaration[] = [];
   private articles: ArticleDocument[] = [];
   private index = new HandwaveIndex("", [], []);
   private rebuildTimer: NodeJS.Timeout | undefined;
   private documentUpdateTimer: NodeJS.Timeout | undefined;
   private diagnosticUpdateTimer: NodeJS.Timeout | undefined;
+  private theoremExplorerRefreshTimer: NodeJS.Timeout | undefined;
   private axiomCheckTimer: NodeJS.Timeout | undefined;
   private compiledLeanChangeTimer: NodeJS.Timeout | undefined;
   private compiledLeanPollTimer: NodeJS.Timeout | undefined;
@@ -122,7 +125,8 @@ class HandwaveController
     this.theoremExplorerProvider = new HandwaveTheoremExplorerProvider(
       () => this.theoremExplorerPayload(),
       (target) => this.openPreviewTarget(target),
-      (target, tag) => this.toggleLeanDeclarationTag(target, tag)
+      (target, tag) => this.toggleLeanDeclarationTag(target, tag),
+      (names) => this.updateTheoremExplorerVisibleTheorems(names)
     );
     const articleSelector: vscode.DocumentSelector = [
       { scheme: "file", language: "handwave-article" },
@@ -173,7 +177,7 @@ class HandwaveController
           if (isLeanUri(document.uri)) {
             this.markLeanAxiomChecksStale();
           }
-          this.scheduleFullRebuild();
+          void this.updateIndexedDocument(document);
         }
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
@@ -217,6 +221,11 @@ class HandwaveController
           if (isLeanUri(uri)) {
             this.markLeanAxiomChecksStale();
           }
+          const document = this.openTextDocumentForUri(uri);
+          if (document) {
+            this.scheduleDocumentUpdate(document);
+            return;
+          }
           this.scheduleFullRebuild();
         })
       );
@@ -235,6 +244,9 @@ class HandwaveController
     }
     if (this.diagnosticUpdateTimer) {
       clearTimeout(this.diagnosticUpdateTimer);
+    }
+    if (this.theoremExplorerRefreshTimer) {
+      clearTimeout(this.theoremExplorerRefreshTimer);
     }
     if (this.axiomCheckTimer) {
       clearTimeout(this.axiomCheckTimer);
@@ -305,6 +317,12 @@ class HandwaveController
       this.markLeanAxiomChecksStale();
       void this.triggerLeanDiagnosticsForOpenPreviews();
     }, 750);
+  }
+
+  private openTextDocumentForUri(uri: vscode.Uri): vscode.TextDocument | undefined {
+    return vscode.workspace.textDocuments.find((document) =>
+      document.uri.scheme === uri.scheme && document.uri.fsPath === uri.fsPath
+    );
   }
 
   private registerCompiledLeanArtifactWatchers(): void {
@@ -504,7 +522,36 @@ class HandwaveController
   }
 
   private refreshTheoremExplorer(): void {
-    this.theoremExplorerProvider.refresh();
+    if (this.theoremExplorerRefreshTimer) {
+      clearTimeout(this.theoremExplorerRefreshTimer);
+    }
+    this.theoremExplorerRefreshTimer = setTimeout(() => {
+      this.theoremExplorerRefreshTimer = undefined;
+      this.theoremExplorerProvider.refresh();
+    }, 50);
+  }
+
+  private async updateTheoremExplorerVisibleTheorems(names: readonly string[]): Promise<void> {
+    const nextNames = [...new Set(names)].sort();
+    const nextKey = nextNames.join("\n");
+    if (nextKey === this.theoremExplorerVisibleKey) {
+      return;
+    }
+
+    this.theoremExplorerVisibleKey = nextKey;
+    this.theoremExplorerVisibleNames.clear();
+    for (const name of nextNames) {
+      this.theoremExplorerVisibleNames.add(name);
+    }
+
+    const declarations = this.visibleTheoremDeclarationsForTheoremExplorer()
+      .map((item) => item.declaration);
+    if (declarations.length === 0) {
+      this.refreshLeanAxiomDemandForOpenPreviews();
+      return;
+    }
+
+    await this.triggerLeanDiagnosticsForDeclarations(declarations);
   }
 
   private currentLeanCheckStatuses(declarations: readonly LeanDeclaration[]): Map<string, LeanDeclarationCheckStatus> {
@@ -1386,7 +1433,7 @@ class HandwaveController
     }
 
     if (data.type === "toggleTag" && typeof data.target === "string" && typeof data.tag === "string") {
-      await this.toggleLeanDeclarationTag(data.target, data.tag);
+      void this.toggleLeanDeclarationTag(data.target, data.tag);
       return;
     }
 
@@ -1426,12 +1473,14 @@ class HandwaveController
       return;
     }
 
-    const saved = await document.save();
-    if (!saved) {
+    void this.updateIndexedDocument(document).catch(() => undefined);
+    void document.save().then((saved) => {
+      if (!saved) {
+        void vscode.window.showWarningMessage(`Handwave updated tags for ${rawTarget}, but could not save the file.`);
+      }
+    }, () => {
       void vscode.window.showWarningMessage(`Handwave updated tags for ${rawTarget}, but could not save the file.`);
-    }
-
-    await this.updateIndexedDocument(document);
+    });
   }
 
   private async openPreviewTarget(
@@ -1491,7 +1540,28 @@ class HandwaveController
         }
       }
     }
+    for (const item of this.visibleTheoremDeclarationsForTheoremExplorer()) {
+      const existing = result.get(item.declaration.name);
+      if (!existing || item.priority < existing.priority) {
+        result.set(item.declaration.name, item);
+      }
+    }
     return [...result.values()].sort(comparePrioritizedLeanDeclarations);
+  }
+
+  private visibleTheoremDeclarationsForTheoremExplorer(): PrioritizedLeanDeclaration[] {
+    const result: PrioritizedLeanDeclaration[] = [];
+    for (const name of this.theoremExplorerVisibleNames) {
+      const declaration = this.index.leanDeclarations.get(name);
+      if (!declaration || !isTheoremLikeDeclaration(declaration)) {
+        continue;
+      }
+      result.push({
+        declaration,
+        priority: this.topLevelLeanAxiomPriority(declaration)
+      });
+    }
+    return result.sort(comparePrioritizedLeanDeclarations);
   }
 
   private visibleTheoremDeclarationsForPreviewState(

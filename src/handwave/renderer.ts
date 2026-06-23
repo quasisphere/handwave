@@ -661,7 +661,22 @@ ${body}
       return;
     }
 
+    if (tag === "milestone") {
+      setMilestoneControlState(control, control.getAttribute("aria-pressed") !== "true");
+    }
     handwaveVscode?.postMessage({ type: "toggleTag", target: handwaveTarget, tag });
+  }
+
+  function setMilestoneControlState(control, active) {
+    control.setAttribute("aria-pressed", String(active));
+    control.textContent = active ? "★" : "☆";
+    const label = active ? "Remove milestone tag" : "Add milestone tag";
+    control.setAttribute("title", label);
+    control.setAttribute("aria-label", label);
+    control.classList.toggle("milestone-control-active", active);
+    control.classList.toggle("milestone-control-inactive", !active);
+    control.classList.toggle("preview-milestone-control-active", active);
+    control.classList.toggle("preview-milestone-control-inactive", !active);
   }
 
   document.addEventListener("click", (event) => {
@@ -1018,7 +1033,9 @@ function renderLeanTheoremContextHtml(
     `<h1>${escapeHtml(title)}</h1>`,
     `<p class="lean-file-path">${escapeHtml(declaration.uri)}</p>`,
     declarations.map((item) =>
-      renderDeclarationPackage(item, `lean:${item.name}`, commandHref, editorHref, index)
+      renderDeclarationPackage(item, `lean:${item.name}`, commandHref, editorHref, index, {
+        dependencyTree: item.name === declaration.name
+      })
     ).join("\n")
   ].join("\n");
 

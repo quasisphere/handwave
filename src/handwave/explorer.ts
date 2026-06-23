@@ -42,7 +42,8 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
   constructor(
     private readonly payloadProvider: () => TheoremExplorerPayload,
     private readonly openPreviewTarget: (target: string) => Promise<void>,
-    private readonly toggleTag: (target: string, tag: string) => Promise<void>
+    private readonly toggleTag: (target: string, tag: string) => Promise<void>,
+    private readonly updateVisibleTheorems: (names: string[]) => Promise<void>
   ) {}
 
   dispose(): void {
@@ -56,9 +57,19 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
     view.webview.onDidReceiveMessage((message: unknown) => {
       void this.handleMessage(message);
     });
+    view.onDidChangeVisibility(() => {
+      if (view.visible) {
+        this.refresh();
+      } else {
+        void this.updateVisibleTheorems([]);
+      }
+    });
   }
 
   refresh(): void {
+    if (!this.view?.visible) {
+      return;
+    }
     const payload = this.payloadProvider();
     void this.view?.webview.postMessage({ type: "setData", payload });
   }
@@ -67,13 +78,21 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
     if (!message || typeof message !== "object") {
       return;
     }
-    const data = message as { type?: unknown; target?: unknown; tag?: unknown };
+    const data = message as { type?: unknown; target?: unknown; tag?: unknown; names?: unknown };
     if (data.type === "openPreview" && typeof data.target === "string") {
-      await this.openPreviewTarget(data.target);
+      void this.openPreviewTarget(data.target);
       return;
     }
     if (data.type === "toggleTag" && typeof data.target === "string" && typeof data.tag === "string") {
-      await this.toggleTag(data.target, data.tag);
+      void this.toggleTag(data.target, data.tag);
+      return;
+    }
+    if (
+      data.type === "visibleTheorems" &&
+      Array.isArray(data.names) &&
+      data.names.every((name) => typeof name === "string")
+    ) {
+      void this.updateVisibleTheorems(data.names);
     }
   }
 }
@@ -655,6 +674,8 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     let suggestionItems = [];
     let activeSuggestionIndex = -1;
     let graphLayoutVersion = 0;
+    let currentGraphLayout = undefined;
+    let visibleTheoremKey = "";
 
     const search = document.getElementById("search");
     const suggestions = document.getElementById("suggestions");
@@ -669,6 +690,66 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         result.set(theorem.name, theorem);
       }
       return result;
+    }
+
+    function theoremForTarget(target) {
+      const name = leanNameFromTarget(target);
+      return name ? byName().get(name) : undefined;
+    }
+
+    function leanNameFromTarget(target) {
+      if (typeof target !== "string" || !target.startsWith("lean:")) {
+        return undefined;
+      }
+
+      let name = target.slice("lean:".length);
+      for (const selector of ["lean.statement", "lean.proof", "statement", "proof"]) {
+        const suffix = "." + selector;
+        if (name.endsWith(suffix)) {
+          name = name.slice(0, -suffix.length);
+          break;
+        }
+      }
+      return name || undefined;
+    }
+
+    function openTargetLocally(target) {
+      const theorem = theoremForTarget(target);
+      if (!theorem) {
+        return false;
+      }
+
+      restrictToTheorem(theorem);
+      preview.scrollTop = 0;
+      return true;
+    }
+
+    function setTheoremMilestone(theorem, active) {
+      const tags = Array.isArray(theorem.tags)
+        ? theorem.tags.filter((tag) => tag !== "milestone")
+        : [];
+      theorem.tags = active ? [...tags, "milestone"] : tags;
+      theorem.milestone = active;
+    }
+
+    function updatePayloadMilestoneCount() {
+      payload.milestoneCount = publicTheorems().filter((theorem) => theorem.milestone).length;
+    }
+
+    function optimisticallyToggleTag(target, tag) {
+      if (tag !== "milestone") {
+        return false;
+      }
+      const theorem = theoremForTarget(target);
+      if (!theorem) {
+        return false;
+      }
+
+      setTheoremMilestone(theorem, !theorem.milestone);
+      updatePayloadMilestoneCount();
+      renderSuggestions();
+      renderExplorerGraph();
+      return true;
     }
 
     function publicTheorems() {
@@ -772,12 +853,15 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       stats.textContent = graphStatsText(roots);
       if (roots.length === 0) {
         graphLayoutVersion++;
+        currentGraphLayout = undefined;
+        reportVisibleTheorems([]);
         graph.innerHTML = '<div class="graph-empty">No theorems.</div>';
         renderPreview();
         return;
       }
       const layout = layoutGraph(roots, theoremMap);
       const version = ++graphLayoutVersion;
+      reportVisibleTheorems(layout.nodes.map((node) => node.name));
       graph.innerHTML = renderGraph(layout, theoremMap);
       window.requestAnimationFrame(() => applyMeasuredGraphLayout(layout, version));
       renderPreview();
@@ -840,6 +924,16 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         rowGap,
         width: (maxColumn + 1) * (nodeWidth + columnGap) - columnGap + 16
       };
+    }
+
+    function reportVisibleTheorems(names) {
+      const uniqueNames = [...new Set(names)].sort();
+      const key = uniqueNames.join("\\n");
+      if (key === visibleTheoremKey) {
+        return;
+      }
+      visibleTheoremKey = key;
+      vscode?.postMessage({ type: "visibleTheorems", names: uniqueNames });
     }
 
     function visitGraphNode(name, theoremMap, nodes, edges, column, path) {
@@ -917,6 +1011,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       svg.setAttribute("height", String(layout.height));
       svg.innerHTML = renderGraphEdges(layout, graphHighlight(layout.edges, selectedName));
       canvas.classList.remove("graph-canvas-measuring");
+      currentGraphLayout = layout;
     }
 
     function renderGraphEdges(layout, highlight) {
@@ -924,6 +1019,31 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         Number(highlight.edges.has(graphEdgeKey(first))) - Number(highlight.edges.has(graphEdgeKey(second)))
       );
       return edges.map((edge) => renderEdge(edge, layout, highlight)).join("");
+    }
+
+    function updateGraphSelection() {
+      if (!currentGraphLayout) {
+        renderPreview();
+        return;
+      }
+
+      const highlight = graphHighlight(currentGraphLayout.edges, selectedName);
+      const theoremMap = byName();
+      currentGraphLayout.nodes.forEach((node, index) => {
+        const theorem = theoremMap.get(node.name);
+        const element = node.element || graph.querySelector('[data-graph-node-index="' + String(index) + '"]');
+        if (!theorem || !element) {
+          return;
+        }
+        element.classList.toggle("graph-node-selected", theorem.name === selectedName);
+        element.classList.toggle("graph-node-dependency", highlight.nodes.has(theorem.name));
+      });
+
+      const svg = graph.querySelector(".graph-edges");
+      if (svg) {
+        svg.innerHTML = renderGraphEdges(currentGraphLayout, highlight);
+      }
+      renderPreview();
     }
 
     function graphHighlight(edges, selectedName) {
@@ -1337,7 +1457,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         return;
       }
       selectedName = theorem.name;
-      renderExplorerGraph();
+      updateGraphSelection();
     });
 
     graph.addEventListener("dblclick", (event) => {
@@ -1361,6 +1481,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         const tag = tagButton.dataset.toggleTag;
         const handwaveTarget = tagButton.dataset.handwaveTarget;
         if (tag && handwaveTarget) {
+          optimisticallyToggleTag(handwaveTarget, tag);
           vscode?.postMessage({ type: "toggleTag", target: handwaveTarget, tag });
         }
         return;
@@ -1372,7 +1493,9 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       event.preventDefault();
       const targetName = link.dataset.handwaveTarget;
       if (targetName) {
-        vscode?.postMessage({ type: "openPreview", target: targetName });
+        if (!link.closest(".viewer-info") || !openTargetLocally(targetName)) {
+          vscode?.postMessage({ type: "openPreview", target: targetName });
+        }
       }
     });
 

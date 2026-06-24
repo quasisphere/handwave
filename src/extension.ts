@@ -1025,6 +1025,11 @@ class HandwaveController
       return false;
     }
 
+    const previous = this.leanAxiomCheckStatuses.get(request.declaration.name);
+    if (isInformativeLeanAxiomStatus(previous)) {
+      return false;
+    }
+
     const nextStatus: LeanDeclarationCheckStatus = {
       checked: false,
       ownChecked: false,
@@ -1035,12 +1040,16 @@ class HandwaveController
       generation: this.leanAxiomCheckGeneration,
       reason
     };
-    const previous = this.leanAxiomCheckStatuses.get(request.declaration.name);
     this.leanAxiomCheckStatuses.set(request.declaration.name, nextStatus);
     return !leanCheckStatusesEqual(previous, nextStatus);
   }
 
   private recordBlockedLeanAxiomStatus(declaration: LeanDeclaration, reason: string): boolean {
+    const previous = this.leanAxiomCheckStatuses.get(declaration.name);
+    if (isInformativeLeanAxiomStatus(previous)) {
+      return false;
+    }
+
     const nextStatus: LeanDeclarationCheckStatus = {
       checked: false,
       ownChecked: false,
@@ -1051,7 +1060,6 @@ class HandwaveController
       generation: this.leanAxiomCheckGeneration,
       reason
     };
-    const previous = this.leanAxiomCheckStatuses.get(declaration.name);
     this.leanAxiomCheckStatuses.set(declaration.name, nextStatus);
     return !leanCheckStatusesEqual(previous, nextStatus);
   }
@@ -2534,6 +2542,12 @@ function runLakeLeanStdin(
 
     child.stdin.end(input);
   });
+}
+
+function isInformativeLeanAxiomStatus(
+  status: LeanDeclarationCheckStatus | undefined
+): status is LeanDeclarationCheckStatus {
+  return Boolean(status && !status.inconclusive && !status.blocked);
 }
 
 function leanCheckStatusesEqual(

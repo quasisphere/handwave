@@ -130,6 +130,15 @@
           "default": true,
           "description": "Use Lean axiom probes to decide whether theorem dependencies transitively depend on sorryAx. When disabled, Handwave only uses Lean LSP diagnostics for theorem badges."
         },
+        "handwave.leanDependencyCheckBackend": {
+          "type": "string",
+          "enum": [
+            "leanServer",
+            "subprocess"
+          ],
+          "default": "leanServer",
+          "description": "Backend for Lean dependency checks. 'leanServer' asks the running Lean language server for #print axioms diagnostics; 'subprocess' runs lake env lean --stdin and is available as an explicit fallback."
+        },
         "handwave.leanDependencyCheckDelayMs": {
           "type": "number",
           "default": 2500,
@@ -140,7 +149,7 @@
           "type": "number",
           "default": 300000,
           "minimum": 1000,
-          "description": "Timeout for each Handwave Lean dependency-check process."
+          "description": "Timeout for each Handwave Lean dependency-check probe."
         },
         "handwave.leanDependencyCheckBatchSize": {
           "type": "number",

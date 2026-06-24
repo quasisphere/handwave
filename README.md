@@ -120,9 +120,12 @@ Badge meanings:
   Lean source or build state.
 
 When dependency checks are enabled, Handwave runs Lean probes with
-`lake env lean --stdin` and `#print axioms` for declarations demanded by open
-previews. The check queue is priority-based and drains pending or stale items
-until there is nothing runnable left.
+`#print axioms` for declarations demanded by open previews. By default it reads
+the resulting informational diagnostics from the running Lean language server,
+using a generated probe file under `.lake/handwave/`. The older
+`lake env lean --stdin` backend remains available only when explicitly selected.
+The check queue is priority-based and drains pending or stale items until there
+is nothing runnable left.
 
 ## Installation
 
@@ -213,6 +216,9 @@ Settings are under the `handwave` namespace:
   syntax and unresolved targets.
 - `handwave.enableLeanDependencyChecks`: enable `#print axioms` probes for
   theorem dependency status.
+- `handwave.leanDependencyCheckBackend`: choose `leanServer` or `subprocess` for
+  dependency checks. The default is `leanServer`; `subprocess` must be selected
+  explicitly.
 - `handwave.leanDependencyCheckDelayMs`: debounce before running dependency
   checks.
 - `handwave.leanDependencyCheckTimeoutMs`: timeout for each Lean probe process.

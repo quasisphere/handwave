@@ -1033,9 +1033,7 @@ function renderLeanTheoremContextHtml(
     `<h1>${escapeHtml(title)}</h1>`,
     `<p class="lean-file-path">${escapeHtml(declaration.uri)}</p>`,
     declarations.map((item) =>
-      renderDeclarationPackage(item, `lean:${item.name}`, commandHref, editorHref, index, {
-        dependencyTree: item.name === declaration.name
-      })
+      renderDeclarationPackage(item, `lean:${item.name}`, commandHref, editorHref, index)
     ).join("\n")
   ].join("\n");
 

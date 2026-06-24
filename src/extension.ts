@@ -60,15 +60,22 @@ interface PrioritizedLeanDeclaration {
   priority: number;
 }
 
+type LeanDependencyCheckBackend = "leanServer" | "subprocess";
+
 type LeanAxiomCheckReadiness =
   | { kind: "ready" }
   | { kind: "skip" }
   | { kind: "blocked"; reason: string };
 
+type LeanAxiomProbeResult =
+  | { ok: true; stdout: string; stderr: string; backend: LeanDependencyCheckBackend }
+  | { ok: false; stdout: string; stderr: string; backend: LeanDependencyCheckBackend };
+
 const topLevelPendingPriority = 0;
 const topLevelStalePriority = 1;
 const directDependencyPriority = 2;
 const defaultLeanAxiomPriority = 1000;
+const leanServerProbeRelativePath = path.join(".lake", "handwave", "AxiomProbe.lean");
 
 export function activate(context: vscode.ExtensionContext): void {
   const controller = new HandwaveController(context);
@@ -116,6 +123,8 @@ class HandwaveController
   private isFlushingAxiomChecks = false;
   private leanAxiomQueueDirty = false;
   private leanAxiomCheckGeneration = 0;
+  private indexGeneration = 0;
+  private activeRebuildGeneration: number | undefined;
   private compiledLeanArtifactsSnapshot: string | undefined;
   private nextPreviewKey = 1;
 
@@ -267,6 +276,7 @@ class HandwaveController
   }
 
   private scheduleFullRebuild(): void {
+    this.indexGeneration++;
     if (this.documentUpdateTimer) {
       clearTimeout(this.documentUpdateTimer);
       this.documentUpdateTimer = undefined;
@@ -360,9 +370,14 @@ class HandwaveController
   }
 
   async rebuildIndex(showNotification = false): Promise<void> {
+    const rebuildGeneration = ++this.indexGeneration;
+    this.activeRebuildGeneration = rebuildGeneration;
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     if (workspaceFolders.length === 0) {
-      this.isIndexing = false;
+      if (this.activeRebuildGeneration === rebuildGeneration) {
+        this.activeRebuildGeneration = undefined;
+        this.isIndexing = false;
+      }
       this.declarations = [];
       this.articles = [];
       this.index = new HandwaveIndex("", [], []);
@@ -393,6 +408,13 @@ class HandwaveController
       articles.push(parseArticleDocument(text, uri.fsPath));
     }
 
+    if (rebuildGeneration !== this.indexGeneration) {
+      if (this.activeRebuildGeneration === rebuildGeneration) {
+        this.scheduleFullRebuild();
+      }
+      return;
+    }
+
     this.declarations = declarations;
     this.articles = articles;
     this.pruneLeanAxiomChecks(declarations);
@@ -410,6 +432,9 @@ class HandwaveController
     }
 
     this.isIndexing = false;
+    if (this.activeRebuildGeneration === rebuildGeneration) {
+      this.activeRebuildGeneration = undefined;
+    }
     this.codeLensEmitter.fire();
     this.refreshTheoremExplorer();
     void this.triggerLeanDiagnosticsForOpenPreviews();
@@ -423,6 +448,7 @@ class HandwaveController
   }
 
   private async updateIndexedDocument(document: vscode.TextDocument): Promise<void> {
+    this.indexGeneration++;
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     if (workspaceFolders.length === 0) {
       return;
@@ -939,7 +965,7 @@ class HandwaveController
       }
 
       this.beginLeanProcessStatus(leanAxiomBatchLabel(job.label, batchIndex, batches.length), timeoutMs);
-      const result = await runLakeLeanStdin(root, input, timeoutMs);
+      const result = await runLeanAxiomProbe(root, input, batch, timeoutMs, leanDependencyCheckBackend(config));
       this.clearLeanProcessStatus();
 
       const axiomsByName = parseLeanAxiomOutput(`${result.stdout}\n${result.stderr}`);
@@ -962,6 +988,7 @@ class HandwaveController
           }
 
           const hasSorry = axioms.includes("sorryAx");
+          const backendLabel = leanAxiomProbeBackendLabel(result.backend);
           const nextStatus = {
             checked: !hasSorry,
             ownChecked: true,
@@ -970,8 +997,8 @@ class HandwaveController
             stale: false,
             generation: this.leanAxiomCheckGeneration,
             reason: hasSorry
-              ? "Lean checks this declaration, but a transitive dependency still depends on sorryAx."
-              : "Lean axiom check reports no transitive dependency on sorryAx."
+              ? `${backendLabel} checks this declaration, but a transitive dependency still depends on sorryAx.`
+              : `${backendLabel} reports no transitive dependency on sorryAx.`
           };
           const previous = this.leanAxiomCheckStatuses.get(name);
           this.leanAxiomCheckStatuses.set(name, {
@@ -2267,6 +2294,15 @@ function leanAxiomDemandJobLabel(requests: readonly LeanAxiomCheckRequest[]): st
   return `${requests.length} Lean dependency checks`;
 }
 
+function leanDependencyCheckBackend(config: vscode.WorkspaceConfiguration): LeanDependencyCheckBackend {
+  const value = config.get<string>("leanDependencyCheckBackend", "leanServer");
+  return value === "subprocess" ? "subprocess" : "leanServer";
+}
+
+function leanAxiomProbeBackendLabel(backend: LeanDependencyCheckBackend): string {
+  return backend === "leanServer" ? "Lean server axiom check" : "Lean subprocess axiom check";
+}
+
 function workspaceRootForFile(
   fsPath: string,
   workspaceFolders: readonly vscode.WorkspaceFolder[]
@@ -2277,6 +2313,183 @@ function workspaceRootForFile(
     .filter((root) => normalizedPath === root || normalizedPath.startsWith(root + path.sep))
     .sort((first, second) => second.length - first.length);
   return roots[0];
+}
+
+async function runLeanAxiomProbe(
+  root: string,
+  input: string,
+  requests: readonly LeanAxiomCheckRequest[],
+  timeoutMs: number,
+  backend: LeanDependencyCheckBackend
+): Promise<LeanAxiomProbeResult> {
+  if (backend === "subprocess") {
+    const result = await runLakeLeanStdin(root, input, timeoutMs);
+    return { ...result, backend: "subprocess" };
+  }
+
+  return runLeanServerAxiomProbe(root, input, requests, timeoutMs);
+}
+
+async function runLeanServerAxiomProbe(
+  root: string,
+  input: string,
+  requests: readonly LeanAxiomCheckRequest[],
+  timeoutMs: number
+): Promise<LeanAxiomProbeResult> {
+  const leanExtension = vscode.extensions.getExtension("leanprover.lean4");
+  if (!leanExtension) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "The Lean 4 VS Code extension is not installed.",
+      backend: "leanServer"
+    };
+  }
+
+  try {
+    await leanExtension.activate();
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: `The Lean 4 VS Code extension could not be activated: ${String(error)}`,
+      backend: "leanServer"
+    };
+  }
+
+  const marker = `handwave_probe_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const probeInput = `${input.replace(/\s*$/, "")}\n\n#check "${marker}"\n`;
+  const probeUri = vscode.Uri.file(path.join(root, leanServerProbeRelativePath));
+
+  try {
+    await writeLeanServerProbeDocument(probeUri, probeInput);
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: `Handwave could not write the Lean server probe file: ${String(error)}`,
+      backend: "leanServer"
+    };
+  }
+
+  return waitForLeanServerAxiomDiagnostics(probeUri, requests, marker, timeoutMs);
+}
+
+async function writeLeanServerProbeDocument(uri: vscode.Uri, text: string): Promise<void> {
+  await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(uri.fsPath)));
+  await vscode.workspace.fs.writeFile(uri, Buffer.from(text, "utf8"));
+  const document = await vscode.workspace.openTextDocument(uri);
+  if (document.getText() === text) {
+    return;
+  }
+
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(uri, fullDocumentRange(document), text);
+  const applied = await vscode.workspace.applyEdit(edit);
+  if (!applied) {
+    throw new Error("VS Code rejected the probe document edit.");
+  }
+  await document.save();
+}
+
+function waitForLeanServerAxiomDiagnostics(
+  uri: vscode.Uri,
+  requests: readonly LeanAxiomCheckRequest[],
+  marker: string,
+  timeoutMs: number
+): Promise<LeanAxiomProbeResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let errorTimer: NodeJS.Timeout | undefined;
+
+    const dispose = vscode.languages.onDidChangeDiagnostics((event) => {
+      if (event.uris.some((item) => sameUri(item, uri))) {
+        inspect();
+      }
+    });
+
+    const timeout = setTimeout(() => {
+      finish(false, "", leanServerDiagnosticText(uri) || "Timed out waiting for Lean server axiom diagnostics.");
+    }, timeoutMs);
+
+    const finish = (ok: boolean, stdout: string, stderr: string) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (errorTimer) {
+        clearTimeout(errorTimer);
+      }
+      clearTimeout(timeout);
+      dispose.dispose();
+      resolve(ok
+        ? { ok: true, stdout, stderr, backend: "leanServer" }
+        : { ok: false, stdout, stderr, backend: "leanServer" });
+    };
+
+    const scheduleErrorResult = (text: string) => {
+      if (errorTimer) {
+        clearTimeout(errorTimer);
+      }
+      errorTimer = setTimeout(() => {
+        finish(false, "", text);
+      }, 900);
+    };
+
+    const inspect = () => {
+      if (settled) {
+        return;
+      }
+      const diagnostics = vscode.languages.getDiagnostics(uri);
+      const text = diagnostics.map((diagnostic) => diagnostic.message).join("\n");
+      const hasMarker = text.includes(marker);
+      if (hasMarker && leanAxiomOutputCoversRequests(text, requests)) {
+        finish(true, text, "");
+        return;
+      }
+      if (diagnostics.some((diagnostic) => diagnostic.severity === vscode.DiagnosticSeverity.Error)) {
+        scheduleErrorResult(leanServerDiagnosticText(uri));
+      }
+    };
+
+    inspect();
+  });
+}
+
+function leanAxiomOutputCoversRequests(
+  output: string,
+  requests: readonly LeanAxiomCheckRequest[]
+): boolean {
+  const axiomsByName = parseLeanAxiomOutput(output);
+  return requests.every((request) => axiomsForDeclaration(axiomsByName, request.declaration) !== undefined);
+}
+
+function leanServerDiagnosticText(uri: vscode.Uri): string {
+  return vscode.languages.getDiagnostics(uri)
+    .map((diagnostic) => `${diagnosticSeverityLabel(diagnostic.severity)}: ${diagnostic.message}`)
+    .join("\n");
+}
+
+function diagnosticSeverityLabel(severity: vscode.DiagnosticSeverity): string {
+  switch (severity) {
+    case vscode.DiagnosticSeverity.Error:
+      return "error";
+    case vscode.DiagnosticSeverity.Warning:
+      return "warning";
+    case vscode.DiagnosticSeverity.Information:
+      return "info";
+    case vscode.DiagnosticSeverity.Hint:
+      return "hint";
+  }
+}
+
+function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
+  const lastLine = document.lineAt(Math.max(0, document.lineCount - 1));
+  return new vscode.Range(new vscode.Position(0, 0), lastLine.rangeIncludingLineBreak.end);
+}
+
+function sameUri(first: vscode.Uri, second: vscode.Uri): boolean {
+  return first.scheme === second.scheme && first.fsPath === second.fsPath;
 }
 
 function runLakeLeanStdin(
@@ -2448,7 +2661,12 @@ function isArticleUri(uri: vscode.Uri): boolean {
 }
 
 function isLeanUri(uri: vscode.Uri): boolean {
-  return uri.fsPath.endsWith(".lean");
+  return uri.fsPath.endsWith(".lean") && !isHandwaveLeanServerProbeUri(uri);
+}
+
+function isHandwaveLeanServerProbeUri(uri: vscode.Uri): boolean {
+  const normalized = path.normalize(uri.fsPath);
+  return normalized.endsWith(path.sep + leanServerProbeRelativePath);
 }
 
 function replaceByUri<T extends { uri: string }>(items: T[], updated: T): T[] {

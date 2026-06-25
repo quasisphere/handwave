@@ -265,8 +265,9 @@ function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): M
     const dependencies: string[] = [];
     const seen = new Set<string>();
     const source = blankLeanCommentsAndStrings(declaration.statement);
+    const localNames = collectLeanLocalNames(source);
     for (const match of source.matchAll(identifierPattern)) {
-      const dependency = privateAliases.get(match[0]) ?? publicAliases.get(match[0]);
+      const dependency = resolveLeanDependencyIdentifier(match[0], privateAliases, publicAliases, localNames);
       if (!dependency || dependency === declaration.name || seen.has(dependency)) {
         continue;
       }
@@ -277,6 +278,67 @@ function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): M
   }
 
   return graph;
+}
+
+function resolveLeanDependencyIdentifier(
+  identifier: string,
+  privateAliases: ReadonlyMap<string, string>,
+  publicAliases: ReadonlyMap<string, string>,
+  localNames: ReadonlySet<string>
+): string | undefined {
+  const exact = privateAliases.get(identifier) ?? publicAliases.get(identifier);
+  if (exact) {
+    return exact;
+  }
+
+  const parts = identifier.split(".").filter(Boolean);
+  if (parts.length < 2 || !localNames.has(parts[0]!)) {
+    return undefined;
+  }
+
+  for (let index = 1; index < parts.length; index++) {
+    const suffix = parts.slice(index).join(".");
+    const dependency = privateAliases.get(suffix) ?? publicAliases.get(suffix);
+    if (dependency) {
+      return dependency;
+    }
+  }
+
+  return undefined;
+}
+
+function collectLeanLocalNames(source: string): Set<string> {
+  const names = new Set<string>();
+  const identifierPattern = /[A-Za-z_][A-Za-z0-9_']*/g;
+  const binderPattern = /[({]\s*([A-Za-z_][A-Za-z0-9_']*(?:\s+[A-Za-z_][A-Za-z0-9_']*)*)\s*:/g;
+  const namedLocalPattern = /\b(?:have|let)\s+([A-Za-z_][A-Za-z0-9_']*)\b/g;
+  const introPattern = /\bintro\s+([^\n;]*)/g;
+  const rcasesPattern = /\brcases\b[^\n]*\bwith\b([^\n]*)/g;
+
+  for (const match of source.matchAll(binderPattern)) {
+    addIdentifiers(names, match[1], identifierPattern);
+  }
+
+  for (const match of source.matchAll(namedLocalPattern)) {
+    names.add(match[1]);
+  }
+
+  for (const match of source.matchAll(introPattern)) {
+    addIdentifiers(names, match[1], identifierPattern);
+  }
+
+  for (const match of source.matchAll(rcasesPattern)) {
+    addIdentifiers(names, match[1], identifierPattern);
+  }
+
+  return names;
+}
+
+function addIdentifiers(target: Set<string>, source: string, pattern: RegExp): void {
+  pattern.lastIndex = 0;
+  for (const match of source.matchAll(pattern)) {
+    target.add(match[0]);
+  }
 }
 
 function leanPrivateDependencyAliasesByUri(declarations: readonly LeanDeclaration[]): Map<string, Map<string, string>> {

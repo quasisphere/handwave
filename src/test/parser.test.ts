@@ -119,6 +119,19 @@ statement:
 theorem yellow_dep : True := by
   exact red_dep
 
+structure Wrapper where
+  proof : True
+
+namespace Wrapper
+
+theorem method_dep (w : Wrapper) : True := by
+  exact w.proof
+
+end Wrapper
+
+theorem method_root (w : Wrapper) : True := by
+  exact w.method_dep
+
 /--
 %%handwave
 statement:
@@ -587,6 +600,13 @@ test("renders theorem hover dependency tree with recursive incomplete dependenci
   const yellowIndex = html.indexOf('data-dependency-name="DependencyTree.yellow_dep"');
   const redIndex = html.indexOf('data-dependency-name="DependencyTree.red_dep"');
   assert.ok(greenIndex >= 0 && yellowIndex > greenIndex && redIndex > yellowIndex);
+});
+
+test("resolves theorem dependencies used through local method notation", () => {
+  const declarations = parseLeanDocument(dependencyTreeLeanText, "/workspace/DependencyTree.lean");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+
+  assert.deepEqual(index.dependenciesForLean("DependencyTree.method_root"), ["DependencyTree.Wrapper.method_dep"]);
 });
 
 test("indexes private Lean declarations as dependency tree nodes", () => {

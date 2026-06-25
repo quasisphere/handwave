@@ -60,6 +60,12 @@ interface PrioritizedLeanDeclaration {
   priority: number;
 }
 
+interface LeanAxiomDemand extends PrioritizedLeanDeclaration {
+  group: number;
+  depth: number;
+  rank: number;
+}
+
 type LeanDependencyCheckBackend = "leanServer" | "subprocess";
 
 type LeanAxiomCheckReadiness =
@@ -71,10 +77,14 @@ type LeanAxiomProbeResult =
   | { ok: true; stdout: string; stderr: string; backend: LeanDependencyCheckBackend }
   | { ok: false; stdout: string; stderr: string; backend: LeanDependencyCheckBackend };
 
-const topLevelPendingPriority = 0;
-const topLevelStalePriority = 1;
-const directDependencyPriority = 2;
-const defaultLeanAxiomPriority = 1000;
+const priorityGroupStride = 1_000_000;
+const priorityDepthStride = 1_000;
+const visibleTheoremPriorityGroup = 0;
+const dependencyPriorityGroup = 1;
+const pendingPriorityRank = 0;
+const stalePriorityRank = 1;
+const knownPriorityRank = 2;
+const coveredByGreenParentPriorityRank = 3;
 const leanServerProbeRelativePath = path.join(".lake", "handwave", "AxiomProbe.lean");
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -1587,38 +1597,59 @@ class HandwaveController
   }
 
   private visibleTheoremDeclarationsForTheoremExplorer(): PrioritizedLeanDeclaration[] {
-    const result: PrioritizedLeanDeclaration[] = [];
+    const declarations: LeanDeclaration[] = [];
     for (const name of this.theoremExplorerVisibleNames) {
       const declaration = this.index.leanDeclarations.get(name);
       if (!declaration || !isTheoremLikeDeclaration(declaration)) {
         continue;
       }
-      result.push({
-        declaration,
-        priority: this.topLevelLeanAxiomPriority(declaration)
-      });
+      declarations.push(declaration);
     }
-    return result.sort(comparePrioritizedLeanDeclarations);
+    const depths = this.visibleTheoremTopologicalDepths(declarations);
+    return declarations
+      .map((declaration) => this.leanAxiomDemand(
+        declaration,
+        visibleTheoremPriorityGroup,
+        depths.get(declaration.name) ?? 0,
+        false
+      ))
+      .sort(comparePrioritizedLeanDeclarations);
   }
 
   private visibleTheoremDeclarationsForPreviewState(
     state: HandwavePreviewState
   ): PrioritizedLeanDeclaration[] {
-    const result = new Map<string, LeanDeclaration>();
-    const priorities = new Map<string, number>();
+    const topLevelDeclarations = this.theoremDeclarationsForPreviewState(state);
+    const topLevelNames = new Set(topLevelDeclarations.map((declaration) => declaration.name));
+    const topLevelDepths = this.visibleTheoremTopologicalDepths(topLevelDeclarations);
+    const demands = new Map<string, LeanAxiomDemand>();
+    const recordDemand = (
+      declaration: LeanDeclaration,
+      group: number,
+      depth: number,
+      coveredByGreenAncestor: boolean
+    ): boolean => {
+      const demand = this.leanAxiomDemand(declaration, group, depth, coveredByGreenAncestor);
+      const existing = demands.get(declaration.name);
+      if (existing && !shouldReplaceLeanAxiomDemand(existing, demand)) {
+        return false;
+      }
+      demands.set(declaration.name, demand);
+      return true;
+    };
     const visit = (
       declaration: LeanDeclaration,
-      priority: number,
+      group: number,
       depth: number,
-      path: ReadonlySet<string>
+      path: ReadonlySet<string>,
+      coveredByGreenAncestor: boolean
     ) => {
-      const existingPriority = priorities.get(declaration.name);
-      if (existingPriority !== undefined && existingPriority < priority) {
+      if (!recordDemand(declaration, group, depth, coveredByGreenAncestor)) {
         return;
       }
 
-      result.set(declaration.name, declaration);
-      priorities.set(declaration.name, priority);
+      const parentStatus = this.index.checkStatusForLean(declaration.name);
+      const nextCoveredByGreenAncestor = coveredByGreenAncestor || Boolean(parentStatus?.checked);
       for (const dependencyName of this.index.dependenciesForLean(declaration.name)) {
         const dependency = this.index.leanDeclarations.get(dependencyName);
         if (
@@ -1627,52 +1658,92 @@ class HandwaveController
         ) {
           continue;
         }
-        const dependencyPriority = directDependencyPriority + depth;
         const status = this.index.checkStatusForLean(dependency.name);
-        if (status && !status.checked && !path.has(dependency.name)) {
+        const dependencyGroup = topLevelNames.has(dependency.name)
+          ? visibleTheoremPriorityGroup
+          : dependencyPriorityGroup;
+        const dependencyDepth = Math.max(depth + 1, topLevelDepths.get(dependency.name) ?? 0);
+        const dependencyCoveredByGreenAncestor =
+          dependencyGroup === dependencyPriorityGroup && nextCoveredByGreenAncestor;
+        if ((!status || !status.checked) && !path.has(dependency.name)) {
           visit(
             dependency,
-            dependencyPriority,
-            depth + 1,
-            new Set([...path, dependency.name])
+            dependencyGroup,
+            dependencyDepth,
+            new Set([...path, dependency.name]),
+            dependencyCoveredByGreenAncestor
           );
           continue;
         }
 
-        const dependencyPriorityExisting = priorities.get(dependency.name);
-        if (dependencyPriorityExisting === undefined || dependencyPriority < dependencyPriorityExisting) {
-          result.set(dependency.name, dependency);
-          priorities.set(dependency.name, dependencyPriority);
-        }
+        recordDemand(
+          dependency,
+          dependencyGroup,
+          dependencyDepth,
+          dependencyCoveredByGreenAncestor
+        );
       }
     };
 
-    for (const declaration of this.theoremDeclarationsForPreviewState(state)) {
+    for (const declaration of topLevelDeclarations) {
       visit(
         declaration,
-        this.topLevelLeanAxiomPriority(declaration),
-        0,
-        new Set([declaration.name])
+        visibleTheoremPriorityGroup,
+        topLevelDepths.get(declaration.name) ?? 0,
+        new Set([declaration.name]),
+        false
       );
     }
 
-    return [...result.values()]
-      .map((declaration) => ({
-        declaration,
-        priority: priorities.get(declaration.name) ?? defaultLeanAxiomPriority
-      }))
+    return [...demands.values()]
       .sort(comparePrioritizedLeanDeclarations);
   }
 
-  private topLevelLeanAxiomPriority(declaration: LeanDeclaration): number {
-    const status = this.index.checkStatusForLean(declaration.name);
-    if (!status) {
-      return topLevelPendingPriority;
+  private leanAxiomDemand(
+    declaration: LeanDeclaration,
+    group: number,
+    depth: number,
+    coveredByGreenAncestor: boolean
+  ): LeanAxiomDemand {
+    const rank = leanAxiomDemandPriorityRank(
+      this.index.checkStatusForLean(declaration.name),
+      coveredByGreenAncestor
+    );
+    return {
+      declaration,
+      group,
+      depth,
+      rank,
+      priority: leanAxiomDemandPriority(group, depth, rank)
+    };
+  }
+
+  private visibleTheoremTopologicalDepths(declarations: readonly LeanDeclaration[]): Map<string, number> {
+    const names = new Set(declarations.map((declaration) => declaration.name));
+    const depths = new Map<string, number>();
+    const visit = (declaration: LeanDeclaration, depth: number, path: ReadonlySet<string>) => {
+      const existing = depths.get(declaration.name);
+      if (existing !== undefined && existing >= depth) {
+        return;
+      }
+      depths.set(declaration.name, depth);
+      for (const dependencyName of this.index.dependenciesForLean(declaration.name)) {
+        if (!names.has(dependencyName) || path.has(dependencyName)) {
+          continue;
+        }
+        const dependency = this.index.leanDeclarations.get(dependencyName);
+        if (!dependency || !isTheoremLikeDeclaration(dependency)) {
+          continue;
+        }
+        visit(dependency, depth + 1, new Set([...path, dependencyName]));
+      }
+    };
+
+    for (const declaration of declarations) {
+      visit(declaration, 0, new Set([declaration.name]));
     }
-    if (status.stale) {
-      return topLevelStalePriority;
-    }
-    return directDependencyPriority;
+
+    return depths;
   }
 
   private theoremDeclarationsForPreviewState(state: HandwavePreviewState): LeanDeclaration[] {
@@ -2077,6 +2148,35 @@ function comparePrioritizedLeanDeclarations(
 ): number {
   return first.priority - second.priority ||
     first.declaration.name.localeCompare(second.declaration.name);
+}
+
+function leanAxiomDemandPriority(group: number, depth: number, rank: number): number {
+  return group * priorityGroupStride + depth * priorityDepthStride + rank;
+}
+
+function shouldReplaceLeanAxiomDemand(existing: LeanAxiomDemand, candidate: LeanAxiomDemand): boolean {
+  if (candidate.group !== existing.group) {
+    return candidate.group < existing.group;
+  }
+  if (candidate.depth !== existing.depth) {
+    return candidate.depth > existing.depth;
+  }
+  return candidate.rank < existing.rank;
+}
+
+function leanAxiomDemandPriorityRank(
+  status: LeanDeclarationCheckStatus | undefined,
+  coveredByGreenAncestor: boolean
+): number {
+  if (!status || status.blocked) {
+    return coveredByGreenAncestor
+      ? coveredByGreenParentPriorityRank
+      : pendingPriorityRank;
+  }
+  if (status.stale) {
+    return stalePriorityRank;
+  }
+  return knownPriorityRank;
 }
 
 function compareLeanAxiomCheckRequests(

@@ -215,15 +215,17 @@ Settings are under the `handwave` namespace:
 - `handwave.enableDiagnostics`: enable diagnostics for malformed Handwave
   syntax and unresolved targets.
 - `handwave.enableLeanDependencyChecks`: enable `#print axioms` probes for
-  theorem dependency status.
-- `handwave.leanDependencyCheckBackend`: choose `leanServer` or `subprocess` for
-  dependency checks. The default is `leanServer`; `subprocess` must be selected
-  explicitly.
+  theorem dependency status. Checks run in preview priority order and batch
+  compatible declarations into optimized generated probes.
+- `handwave.leanDependencyCheckBackend`: choose `subprocess` or `leanServer` for
+  dependency checks. The default is `subprocess`, which runs optimized
+  `lake env lean` probes. `leanServer` remains available as an explicit
+  experimental backend.
 - `handwave.leanDependencyCheckDelayMs`: debounce before running dependency
   checks.
-- `handwave.leanDependencyCheckTimeoutMs`: timeout for each Lean probe process.
-- `handwave.leanDependencyCheckBatchSize`: maximum declarations checked in one
-  Lean probe process.
+- `handwave.leanDependencyCheckTimeoutMs`: timeout for each Lean probe.
+- `handwave.leanDependencyCheckBatchSize`: maximum compatible declarations
+  checked in one Lean probe.
 
 ## Development
 

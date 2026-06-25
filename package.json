@@ -133,11 +133,11 @@
         "handwave.leanDependencyCheckBackend": {
           "type": "string",
           "enum": [
-            "leanServer",
-            "subprocess"
+            "subprocess",
+            "leanServer"
           ],
-          "default": "leanServer",
-          "description": "Backend for Lean dependency checks. 'leanServer' asks the running Lean language server for #print axioms diagnostics; 'subprocess' runs lake env lean --stdin and is available as an explicit fallback."
+          "default": "subprocess",
+          "description": "Backend for Lean dependency checks. 'subprocess' runs optimized lake env lean probes; 'leanServer' asks the running Lean language server for #print axioms diagnostics."
         },
         "handwave.leanDependencyCheckDelayMs": {
           "type": "number",
@@ -155,7 +155,7 @@
           "type": "number",
           "default": 16,
           "minimum": 1,
-          "description": "Maximum number of declarations to check in one Handwave Lean dependency-check process."
+          "description": "Maximum number of compatible declarations to check in one Handwave Lean dependency-check probe."
         }
       }
     },

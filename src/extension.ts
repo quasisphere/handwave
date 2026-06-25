@@ -814,15 +814,16 @@ class HandwaveController
     let selectedRoot: string | undefined;
     const selectedUris = new Set<string>();
     let selectedHasPrivate = false;
+    let blockedChanged = false;
 
     for (const { declaration, priority } of candidates) {
       const target = leanAxiomProbeTarget(declaration.uri, workspaceFolders);
       if (!target) {
         this.leanAxiomCheckQueue.delete(declaration.name);
-        this.recordBlockedLeanAxiomStatus(
+        blockedChanged = this.recordBlockedLeanAxiomStatus(
           declaration,
           "Handwave cannot run the Lean dependency check because this declaration is not in a Lean module under a workspace root."
-        );
+        ) || blockedChanged;
         continue;
       }
       if (selectedRoot !== undefined && selectedRoot !== target.root) {
@@ -855,10 +856,16 @@ class HandwaveController
     }
 
     if (requests.length === 0) {
+      if (blockedChanged) {
+        this.refreshLeanStatusViews();
+      }
       return undefined;
     }
 
     requests.sort(compareLeanAxiomCheckRequests);
+    if (blockedChanged) {
+      this.refreshLeanStatusViews();
+    }
     return {
       label: leanAxiomDemandJobLabel(requests),
       requests
@@ -942,82 +949,77 @@ class HandwaveController
 
     const config = vscode.workspace.getConfiguration("handwave");
     const timeoutMs = config.get<number>("leanDependencyCheckTimeoutMs", 300000);
-    const batchSize = Math.max(1, Math.floor(config.get<number>("leanDependencyCheckBatchSize", 16)));
-    const batches = chunkLeanAxiomRequests(requests, batchSize);
-    let changed = false;
+    const backend = leanDependencyCheckBackend(config);
 
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
-      let input: string;
-      try {
-        input = await leanAxiomProbeInput(root, batch);
-      } catch {
-        for (const request of batch) {
-          if (this.isCurrentAxiomRequest(request)) {
-            changed = this.recordBlockedLeanAxiomStatus(
-              request.declaration,
-              "Handwave could not prepare the Lean dependency check for this declaration."
-            ) || changed;
-          }
-          this.leanAxiomChecksRunning.delete(request.declaration.name);
+    let input: string;
+    try {
+      input = await leanAxiomProbeInput(root, requests);
+    } catch {
+      let changed = false;
+      for (const request of requests) {
+        if (this.isCurrentAxiomRequest(request)) {
+          changed = this.recordBlockedLeanAxiomStatus(
+            request.declaration,
+            "Handwave could not prepare the Lean dependency check for this declaration."
+          ) || changed;
         }
-        continue;
+        this.leanAxiomChecksRunning.delete(request.declaration.name);
       }
+      return changed;
+    }
 
-      this.beginLeanProcessStatus(leanAxiomBatchLabel(job.label, batchIndex, batches.length), timeoutMs);
-      const result = await runLeanAxiomProbe(root, input, batch, timeoutMs, leanDependencyCheckBackend(config));
+    this.beginLeanProcessStatus(job.label, timeoutMs);
+    let result: LeanAxiomProbeResult;
+    try {
+      result = await runLeanAxiomProbe(root, input, requests, timeoutMs, backend);
+    } finally {
       this.clearLeanProcessStatus();
+    }
 
-      const axiomsByName = parseLeanAxiomOutput(`${result.stdout}\n${result.stderr}`);
-      let batchChanged = false;
-      try {
-        for (const request of batch) {
-          const name = request.declaration.name;
-          if (!this.isCurrentAxiomRequest(request)) {
-            continue;
-          }
-          const axioms = axiomsForDeclaration(axiomsByName, request.declaration);
-          if (!axioms) {
-            batchChanged = this.recordInconclusiveLeanAxiomStatus(
-              request,
-              result.ok
-                ? "The Lean dependency check finished, but did not report an axiom status for this declaration."
-                : "Handwave could not finish the Lean dependency check for this declaration."
-            ) || batchChanged;
-            continue;
-          }
+    const axiomsByName = parseLeanAxiomOutput(`${result.stdout}\n${result.stderr}`);
+    let changed = false;
+    try {
+      for (const request of requests) {
+        const name = request.declaration.name;
+        if (!this.isCurrentAxiomRequest(request)) {
+          continue;
+        }
+        const axioms = axiomsForDeclaration(axiomsByName, request.declaration);
+        if (!axioms) {
+          changed = this.recordInconclusiveLeanAxiomStatus(
+            request,
+            result.ok
+              ? "The Lean dependency check finished, but did not report an axiom status for this declaration."
+              : "Handwave could not finish the Lean dependency check for this declaration."
+          ) || changed;
+          continue;
+        }
 
-          const hasSorry = axioms.includes("sorryAx");
-          const backendLabel = leanAxiomProbeBackendLabel(result.backend);
-          const nextStatus = {
-            checked: !hasSorry,
-            ownChecked: true,
-            dependencies: axioms,
-            failedDependencies: hasSorry ? ["sorryAx"] : [],
-            stale: false,
-            generation: this.leanAxiomCheckGeneration,
-            reason: hasSorry
-              ? `${backendLabel} checks this declaration, but a transitive dependency still depends on sorryAx.`
-              : `${backendLabel} reports no transitive dependency on sorryAx.`
-          };
-          const previous = this.leanAxiomCheckStatuses.get(name);
-          this.leanAxiomCheckStatuses.set(name, {
-            ...nextStatus
-          });
-          batchChanged = batchChanged || !leanCheckStatusesEqual(previous, nextStatus);
-        }
-      } finally {
-        for (const request of batch) {
-          this.leanAxiomChecksRunning.delete(request.declaration.name);
-        }
+        const hasSorry = axioms.includes("sorryAx");
+        const backendLabel = leanAxiomProbeBackendLabel(result.backend);
+        const nextStatus = {
+          checked: !hasSorry,
+          ownChecked: true,
+          dependencies: axioms,
+          failedDependencies: hasSorry ? ["sorryAx"] : [],
+          stale: false,
+          generation: this.leanAxiomCheckGeneration,
+          reason: hasSorry
+            ? `${backendLabel} checks this declaration, but a transitive dependency still depends on sorryAx.`
+            : `${backendLabel} reports no transitive dependency on sorryAx.`
+        };
+        const previous = this.leanAxiomCheckStatuses.get(name);
+        this.leanAxiomCheckStatuses.set(name, {
+          ...nextStatus
+        });
+        changed = changed || !leanCheckStatusesEqual(previous, nextStatus);
       }
-
-      if (batchChanged) {
-        changed = true;
-        this.refreshLeanStatusViews();
+      return changed;
+    } finally {
+      for (const request of requests) {
+        this.leanAxiomChecksRunning.delete(request.declaration.name);
       }
     }
-    return changed;
   }
 
   private recordInconclusiveLeanAxiomStatus(request: LeanAxiomCheckRequest, reason: string): boolean {
@@ -2085,21 +2087,6 @@ function compareLeanAxiomCheckRequests(
     first.declaration.name.localeCompare(second.declaration.name);
 }
 
-function chunkLeanAxiomRequests(
-  requests: readonly LeanAxiomCheckRequest[],
-  batchSize: number
-): LeanAxiomCheckRequest[][] {
-  const chunks: LeanAxiomCheckRequest[][] = [];
-  for (let index = 0; index < requests.length; index += batchSize) {
-    chunks.push(requests.slice(index, index + batchSize));
-  }
-  return chunks;
-}
-
-function leanAxiomBatchLabel(label: string, batchIndex: number, batchCount: number): string {
-  return batchCount <= 1 ? label : `${label} (${batchIndex + 1}/${batchCount})`;
-}
-
 function directIncompleteProofStatus(declaration: LeanDeclaration): LeanDeclarationCheckStatus | undefined {
   const proof = declaration.leanProof ?? "";
   const searchableProof = blankLeanCommentsAndStrings(proof);
@@ -2234,12 +2221,27 @@ async function leanAxiomProbeInput(
   root: string,
   requests: readonly LeanAxiomCheckRequest[]
 ): Promise<string> {
+  if (requests.every((request) => !request.declaration.isPrivate)) {
+    const importedInput = leanAxiomImportedProbeInput(root, requests);
+    if (importedInput) {
+      return importedInput;
+    }
+  }
+
+  return leanAxiomSourceProbeInput(root, requests);
+}
+
+async function leanAxiomSourceProbeInput(
+  root: string,
+  requests: readonly LeanAxiomCheckRequest[]
+): Promise<string> {
   const names = requests.map((request) => request.declaration.sourceName);
   const uniqueUris = [...new Set(requests.map((request) => request.declaration.uri))].sort();
   if (uniqueUris.length === 1) {
     const source = await readWorkspaceText(vscode.Uri.file(uniqueUris[0]));
+    const prefix = source.slice(0, sourcePrefixEndOffset(source, requests));
     return [
-      source,
+      prefix,
       ...names.map((name) => `#print axioms ${name}`),
       ""
     ].join("\n");
@@ -2254,6 +2256,50 @@ async function leanAxiomProbeInput(
     ...modules.map((moduleName) => `import ${moduleName}`),
     "",
     ...names.map((name) => `#print axioms ${name}`),
+    ""
+  ].join("\n");
+}
+
+function sourcePrefixEndOffset(
+  source: string,
+  requests: readonly LeanAxiomCheckRequest[]
+): number {
+  return Math.max(
+    0,
+    ...requests.map((request) => offsetAtPosition(source, request.declaration.range.end))
+  );
+}
+
+function offsetAtPosition(source: string, position: PositionLike): number {
+  let line = 0;
+  let lineStart = 0;
+  for (let offset = 0; offset < source.length && line < position.line; offset++) {
+    if (source.charCodeAt(offset) === 10) {
+      line++;
+      lineStart = offset + 1;
+    }
+  }
+  return Math.max(0, Math.min(source.length, lineStart + position.character));
+}
+
+function leanAxiomImportedProbeInput(
+  root: string,
+  requests: readonly LeanAxiomCheckRequest[]
+): string | undefined {
+  const moduleNames: string[] = [];
+  for (const request of requests) {
+    const moduleName = leanModuleNameForFile(request.declaration.uri, root);
+    if (!moduleName) {
+      return undefined;
+    }
+    moduleNames.push(moduleName);
+  }
+  const uniqueModuleNames = [...new Set(moduleNames)].sort();
+
+  return [
+    ...uniqueModuleNames.map((moduleName) => `import ${moduleName}`),
+    "",
+    ...requests.map((request) => `#print axioms ${request.declaration.sourceName}`),
     ""
   ].join("\n");
 }
@@ -2303,8 +2349,8 @@ function leanAxiomDemandJobLabel(requests: readonly LeanAxiomCheckRequest[]): st
 }
 
 function leanDependencyCheckBackend(config: vscode.WorkspaceConfiguration): LeanDependencyCheckBackend {
-  const value = config.get<string>("leanDependencyCheckBackend", "leanServer");
-  return value === "subprocess" ? "subprocess" : "leanServer";
+  const value = config.get<string>("leanDependencyCheckBackend", "subprocess");
+  return value === "leanServer" ? "leanServer" : "subprocess";
 }
 
 function leanAxiomProbeBackendLabel(backend: LeanDependencyCheckBackend): string {

@@ -561,8 +561,10 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       display: none;
     }
     .proof-content,
-    .proof-body {
-      display: block;
+    .proof-body,
+    .proof-body > .prose-content,
+    .proof-body > .prose-content > .prose-paragraph:first-child {
+      display: inline;
     }
     .qed {
       float: right;

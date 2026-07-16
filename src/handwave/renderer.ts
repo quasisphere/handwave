@@ -529,10 +529,16 @@ function renderHtmlShell(
       top: -0.05em;
     }
     .proof-body {
-      display: block;
+      display: inline;
     }
     .proof-content {
-      display: block;
+      display: inline;
+    }
+    [data-mode="text"] .proof-body > .prose-content {
+      display: inline;
+    }
+    .proof-body > .prose-content > .prose-paragraph:first-child {
+      display: inline;
     }
     .proof-body .lean-content {
       margin-top: 0.5em;

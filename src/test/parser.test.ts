@@ -421,6 +421,9 @@ test("renders Lean statement includes as theorem views", () => {
   assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
   assert.match(html, /class="source-popover"><span class="source-popover-row"><button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:my_add_assoc" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="editor:lean:my_add_assoc" title="Open my_add_assoc in editor">my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
   assert.match(html, /<div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾<\/button><span class="declaration-label"><strong>Proof\.<\/strong>.*<div class="proof-content">/);
+  assert.match(html, /\.proof-content \{\s*display: inline;/);
+  assert.match(html, /\[data-mode="text"\] \.proof-body > \.prose-content \{\s*display: inline;/);
+  assert.match(html, /\.proof-body > \.prose-content > \.prose-paragraph:first-child \{\s*display: inline;/);
   assert.match(html, /Use the standard associativity theorem\.<span class="qed" aria-label="QED">□<\/span>/);
   assert.match(html, /aria-label="Theorem view"/);
   assert.match(html, /aria-label="Proof view"/);

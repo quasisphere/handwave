@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { collectDiagnostics, DiagnosticIssue } from "./handwave/diagnostics";
 import { buildTheoremExplorerPayload, HandwaveTheoremExplorerProvider } from "./handwave/explorer";
 import { HandwaveIndex } from "./handwave/index";
@@ -129,6 +129,7 @@ class HandwaveController
   private leanProcessStartedAt: number | undefined;
   private leanProcessStatusLabel: string | undefined;
   private leanProcessTimeoutMs: number | undefined;
+  private activeLeanAxiomProbeAbort: AbortController | undefined;
   private isIndexing = false;
   private isFlushingAxiomChecks = false;
   private leanAxiomQueueDirty = false;
@@ -276,6 +277,7 @@ class HandwaveController
     if (this.compiledLeanPollTimer) {
       clearInterval(this.compiledLeanPollTimer);
     }
+    this.cancelActiveLeanAxiomProbe();
     this.clearLeanProcessStatus();
     for (const disposable of this.disposables) {
       disposable.dispose();
@@ -490,6 +492,7 @@ class HandwaveController
   }
 
   private clearLeanAxiomChecks(): void {
+    this.cancelActiveLeanAxiomProbe();
     this.leanAxiomCheckGeneration++;
     this.leanAxiomCheckStatuses.clear();
     this.leanAxiomCheckQueue.clear();
@@ -505,6 +508,7 @@ class HandwaveController
     // A Lean source or compiled-artifact change can alter the transitive axiom
     // footprint of declarations in other files. Keep the latest known answers
     // visible, but make them stale and allow fresh probes to be requested.
+    this.cancelActiveLeanAxiomProbe();
     this.leanAxiomCheckGeneration++;
     this.leanAxiomCheckQueue.clear();
     this.leanAxiomChecksRunning.clear();
@@ -823,7 +827,7 @@ class HandwaveController
     const requests: LeanAxiomCheckRequest[] = [];
     let selectedRoot: string | undefined;
     const selectedUris = new Set<string>();
-    let selectedHasPrivate = false;
+    let selectedRequiresSourceProbe = false;
     let blockedChanged = false;
 
     for (const { declaration, priority } of candidates) {
@@ -839,9 +843,10 @@ class HandwaveController
       if (selectedRoot !== undefined && selectedRoot !== target.root) {
         continue;
       }
+      const requiresSourceProbe = leanAxiomProbeRequiresSource(declaration, target.root);
       if (
-        (selectedHasPrivate && !selectedUris.has(declaration.uri)) ||
-        (declaration.isPrivate &&
+        (selectedRequiresSourceProbe && !selectedUris.has(declaration.uri)) ||
+        (requiresSourceProbe &&
           selectedUris.size > 0 &&
           (selectedUris.size > 1 || !selectedUris.has(declaration.uri)))
       ) {
@@ -850,7 +855,7 @@ class HandwaveController
 
       selectedRoot = target.root;
       selectedUris.add(declaration.uri);
-      selectedHasPrivate = selectedHasPrivate || declaration.isPrivate;
+      selectedRequiresSourceProbe = selectedRequiresSourceProbe || requiresSourceProbe;
 
       this.leanAxiomCheckQueue.delete(declaration.name);
       this.leanAxiomChecksRunning.add(declaration.name);
@@ -978,11 +983,16 @@ class HandwaveController
       return changed;
     }
 
+    const abortController = new AbortController();
+    this.activeLeanAxiomProbeAbort = abortController;
     this.beginLeanProcessStatus(job.label, timeoutMs);
     let result: LeanAxiomProbeResult;
     try {
-      result = await runLeanAxiomProbe(root, input, requests, timeoutMs, backend);
+      result = await runLeanAxiomProbe(root, input, requests, timeoutMs, backend, abortController.signal);
     } finally {
+      if (this.activeLeanAxiomProbeAbort === abortController) {
+        this.activeLeanAxiomProbeAbort = undefined;
+      }
       this.clearLeanProcessStatus();
     }
 
@@ -1113,6 +1123,15 @@ class HandwaveController
     this.leanProcessStatusLabel = undefined;
     this.leanProcessTimeoutMs = undefined;
     this.leanProcessStatusBar.hide();
+  }
+
+  private cancelActiveLeanAxiomProbe(): void {
+    if (!this.activeLeanAxiomProbeAbort) {
+      return;
+    }
+
+    this.activeLeanAxiomProbeAbort.abort();
+    this.activeLeanAxiomProbeAbort = undefined;
   }
 
   private isCurrentAxiomRequest(request: LeanAxiomCheckRequest): boolean {
@@ -2321,7 +2340,7 @@ async function leanAxiomProbeInput(
   root: string,
   requests: readonly LeanAxiomCheckRequest[]
 ): Promise<string> {
-  if (requests.every((request) => !request.declaration.isPrivate)) {
+  if (requests.every((request) => !leanAxiomProbeRequiresSource(request.declaration, root))) {
     const importedInput = leanAxiomImportedProbeInput(root, requests);
     if (importedInput) {
       return importedInput;
@@ -2404,6 +2423,46 @@ function leanAxiomImportedProbeInput(
   ].join("\n");
 }
 
+function leanAxiomProbeRequiresSource(declaration: LeanDeclaration, root: string): boolean {
+  return declaration.isPrivate || !leanCompiledOleanIsFreshForSource(declaration.uri, root);
+}
+
+function leanCompiledOleanIsFreshForSource(fsPath: string, root: string): boolean {
+  const openDocument = vscode.workspace.textDocuments.find((document) =>
+    document.uri.scheme === "file" && document.uri.fsPath === fsPath
+  );
+  if (openDocument?.isDirty) {
+    return false;
+  }
+
+  const oleanPath = leanCompiledOleanPath(fsPath, root);
+  if (!oleanPath) {
+    return false;
+  }
+
+  try {
+    const sourceStat = fs.statSync(fsPath);
+    const oleanStat = fs.statSync(oleanPath);
+    return oleanStat.mtimeMs + 1 >= sourceStat.mtimeMs;
+  } catch {
+    return false;
+  }
+}
+
+function leanCompiledOleanPath(fsPath: string, root: string): string | undefined {
+  const relative = path.relative(root, fsPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative) || !relative.endsWith(".lean")) {
+    return undefined;
+  }
+
+  const withoutExtension = relative.slice(0, -".lean".length);
+  if (!withoutExtension) {
+    return undefined;
+  }
+
+  return path.join(root, ".lake", "build", "lib", "lean", ...withoutExtension.split(/[\\/]+/)) + ".olean";
+}
+
 function leanModuleNameForFile(fsPath: string, root: string): string | undefined {
   const relative = path.relative(root, fsPath);
   if (relative.startsWith("..") || path.isAbsolute(relative) || !relative.endsWith(".lean")) {
@@ -2474,22 +2533,33 @@ async function runLeanAxiomProbe(
   input: string,
   requests: readonly LeanAxiomCheckRequest[],
   timeoutMs: number,
-  backend: LeanDependencyCheckBackend
+  backend: LeanDependencyCheckBackend,
+  signal?: AbortSignal
 ): Promise<LeanAxiomProbeResult> {
   if (backend === "subprocess") {
-    const result = await runLakeLeanStdin(root, input, timeoutMs);
+    const result = await runLakeLeanStdin(root, input, timeoutMs, signal);
     return { ...result, backend: "subprocess" };
   }
 
-  return runLeanServerAxiomProbe(root, input, requests, timeoutMs);
+  return runLeanServerAxiomProbe(root, input, requests, timeoutMs, signal);
 }
 
 async function runLeanServerAxiomProbe(
   root: string,
   input: string,
   requests: readonly LeanAxiomCheckRequest[],
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<LeanAxiomProbeResult> {
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "Handwave canceled the Lean server axiom check.",
+      backend: "leanServer"
+    };
+  }
+
   const leanExtension = vscode.extensions.getExtension("leanprover.lean4");
   if (!leanExtension) {
     return {
@@ -2526,7 +2596,7 @@ async function runLeanServerAxiomProbe(
     };
   }
 
-  return waitForLeanServerAxiomDiagnostics(probeUri, requests, marker, timeoutMs);
+  return waitForLeanServerAxiomDiagnostics(probeUri, requests, marker, timeoutMs, signal);
 }
 
 async function writeLeanServerProbeDocument(uri: vscode.Uri, text: string): Promise<void> {
@@ -2550,7 +2620,8 @@ function waitForLeanServerAxiomDiagnostics(
   uri: vscode.Uri,
   requests: readonly LeanAxiomCheckRequest[],
   marker: string,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<LeanAxiomProbeResult> {
   return new Promise((resolve) => {
     let settled = false;
@@ -2575,11 +2646,17 @@ function waitForLeanServerAxiomDiagnostics(
         clearTimeout(errorTimer);
       }
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
       dispose.dispose();
       resolve(ok
         ? { ok: true, stdout, stderr, backend: "leanServer" }
         : { ok: false, stdout, stderr, backend: "leanServer" });
     };
+
+    const abort = () => {
+      finish(false, "", "Handwave canceled the Lean server axiom check.");
+    };
+    signal?.addEventListener("abort", abort, { once: true });
 
     const scheduleErrorResult = (text: string) => {
       if (errorTimer) {
@@ -2607,6 +2684,9 @@ function waitForLeanServerAxiomDiagnostics(
     };
 
     inspect();
+    if (signal?.aborted) {
+      abort();
+    }
   });
 }
 
@@ -2649,19 +2729,51 @@ function sameUri(first: vscode.Uri, second: vscode.Uri): boolean {
 function runLakeLeanStdin(
   cwd: string,
   input: string,
-  timeoutMs = 300000
+  timeoutMs = 300000,
+  signal?: AbortSignal
 ): Promise<{ ok: true; stdout: string; stderr: string } | { ok: false; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn("lake", ["env", "lean", "--stdin"], { cwd });
+    if (signal?.aborted) {
+      resolve({ ok: false, stdout: "", stderr: "Handwave canceled the Lean subprocess axiom check." });
+      return;
+    }
+
+    const child = spawn("lake", ["env", "lean", "--stdin"], {
+      cwd,
+      detached: process.platform !== "win32"
+    });
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
+    let canceled = false;
+    let killTimer: NodeJS.Timeout | undefined;
 
     const timer = setTimeout(() => {
       if (!settled) {
-        child.kill();
+        timedOut = true;
+        terminateLeanSubprocess(child);
+        killTimer = setTimeout(() => terminateLeanSubprocess(child, "SIGKILL"), 2000);
       }
     }, timeoutMs);
+
+    const abort = () => {
+      if (settled) {
+        return;
+      }
+      canceled = true;
+      terminateLeanSubprocess(child);
+      killTimer = setTimeout(() => terminateLeanSubprocess(child, "SIGKILL"), 2000);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (killTimer) {
+        clearTimeout(killTimer);
+      }
+      signal?.removeEventListener("abort", abort);
+    };
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
@@ -2669,25 +2781,56 @@ function runLakeLeanStdin(
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
+    child.stdin.on("error", () => {
+      // The process may exit or be canceled before VS Code finishes writing the probe.
+    });
     child.on("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       resolve({ ok: false, stdout, stderr: stderr || error.message });
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signalName) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timer);
-      resolve(code === 0 ? { ok: true, stdout, stderr } : { ok: false, stdout, stderr });
+      cleanup();
+      if (code === 0) {
+        resolve({ ok: true, stdout, stderr });
+        return;
+      }
+      const reason = stderr ||
+        (timedOut
+          ? `Timed out after ${formatDuration(timeoutMs)} waiting for Lean subprocess axiom check.`
+          : canceled
+            ? "Handwave canceled the Lean subprocess axiom check."
+            : `Lean subprocess axiom check exited with ${code === null ? signalName ?? "unknown status" : `code ${code}`}.`);
+      resolve({ ok: false, stdout, stderr: reason });
     });
 
     child.stdin.end(input);
   });
+}
+
+function terminateLeanSubprocess(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (child.pid === undefined) {
+    child.kill(signal);
+    return;
+  }
+
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child if the process group is already gone.
+    }
+  }
+
+  child.kill(signal);
 }
 
 function isInformativeLeanAxiomStatus(

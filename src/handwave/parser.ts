@@ -8,8 +8,13 @@ import {
 } from "./types";
 import { rangeFromOffsets } from "./position";
 
-const declarationPattern =
-  /\b(theorem|lemma|def|abbrev|instance|structure|class|inductive)\s+([A-Za-z_][A-Za-z0-9_'.]*|«[^»]+»)/g;
+const leanIdentifierSource = String.raw`[\p{L}_][\p{L}\p{N}\p{M}_']*`;
+const leanQualifiedIdentifierSource =
+  `${leanIdentifierSource}(?:\\.${leanIdentifierSource})*`;
+const declarationPattern = new RegExp(
+  `\\b(theorem|lemma|def|abbrev|instance|structure|class|inductive)\\s+(${leanQualifiedIdentifierSource}|«[^»]+»)`,
+  "gu"
+);
 
 const supportedSelectors = [
   "lean.statement",
@@ -188,6 +193,11 @@ export function parseTarget(raw: string): ParsedTarget {
 
 export function isSupportedSelector(selector: string | undefined): boolean {
   return selector === undefined || supportedSelectors.includes(selector);
+}
+
+export function isHandwaveNavigationTarget(raw: string): boolean {
+  const kind = parseTarget(raw).kind;
+  return kind === "lean" || kind === "article" || kind === "local";
 }
 
 export function slugify(title: string): string {
@@ -439,8 +449,12 @@ function namespaceAt(searchableText: string, offset: number): string[] {
     | { kind: "namespace"; name: string }
     | { kind: "section"; name?: string };
   const stack: ScopeEntry[] = [];
-  const namespacePattern =
-    /^\s*(?:(namespace)[ \t]+([A-Za-z_][A-Za-z0-9_'.]*(?:[ \t]+[A-Za-z_][A-Za-z0-9_'.]*)*)|(section)(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?|end(?:[ \t]+([A-Za-z_][A-Za-z0-9_'.]*))?)\b/gm;
+  const namespacePattern = new RegExp(
+    `^\\s*(?:(namespace)[ \\t]+(${leanQualifiedIdentifierSource}(?:[ \\t]+${leanQualifiedIdentifierSource})*)|` +
+      `(section)(?:[ \\t]+(${leanQualifiedIdentifierSource}))?|` +
+      `end(?:[ \\t]+(${leanQualifiedIdentifierSource}))?)(?=\\s|$)`,
+    "gmu"
+  );
   const prefix = searchableText.slice(0, offset);
 
   for (const match of prefix.matchAll(namespacePattern)) {

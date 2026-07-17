@@ -1,5 +1,11 @@
 import { HandwaveIndex } from "./index";
-import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget } from "./parser";
+import {
+  hasHandwaveTag,
+  isHandwaveNavigationTarget,
+  parseArticleDocument,
+  parseLeanDocument,
+  parseTarget
+} from "./parser";
 import { LeanDeclaration } from "./types";
 
 interface RenderOptions {
@@ -889,16 +895,13 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
 function renderInlineMarkdown(text: string, commandHref: (target: string) => string): string {
   const escaped = escapeHtml(text);
   return escaped.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label: string, target: string) => {
-    const navigationAttribute = isPreviewNavigableTarget(target)
+    const handwaveNavigation = isHandwaveNavigationTarget(target);
+    const navigationAttribute = handwaveNavigation
       ? ` data-handwave-target="${escapeHtml(target)}"`
       : "";
-    return `<a href="${escapeHtml(commandHref(target))}"${navigationAttribute} title="${escapeHtml(target)}">${label}</a>`;
+    const href = handwaveNavigation ? commandHref(target) : target;
+    return `<a href="${escapeHtml(href)}"${navigationAttribute} title="${escapeHtml(target)}">${label}</a>`;
   });
-}
-
-function isPreviewNavigableTarget(target: string): boolean {
-  const parsed = parseTarget(target);
-  return parsed.kind === "lean" || parsed.kind === "article" || parsed.kind === "local";
 }
 
 function proseParagraphs(text: string): string[] {

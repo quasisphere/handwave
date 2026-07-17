@@ -59,16 +59,26 @@ function addTargetDiagnostic(
 ): void {
   const target = parseTarget(rawTarget);
   if (target.kind === "term") {
+    if (isInclude) {
+      issues.push({
+        uri: fromUri,
+        message: `Unsupported Handwave include target '${rawTarget}'.`,
+        range,
+        severity: "warning"
+      });
+    }
     return;
   }
 
   if (target.kind === "unknown") {
-    issues.push({
-      uri: fromUri,
-      message: `Unknown Handwave target scheme in '${rawTarget}'.`,
-      range,
-      severity: "warning"
-    });
+    if (isInclude) {
+      issues.push({
+        uri: fromUri,
+        message: `Unsupported Handwave include target '${rawTarget}'.`,
+        range,
+        severity: "warning"
+      });
+    }
     return;
   }
 

@@ -265,6 +265,56 @@ end RelWP
   assert.equal(declarations[0].name, "RelWP.HyperbolicMetric.sample_theorem");
 });
 
+test("indexes and renders includes for Unicode Lean declaration names", () => {
+  const unicodeName =
+    "JJMath.Cohomology.openSingularCochainTop_homologyπ_zero_eq_zero_of_sheafified_boundary_subdivision";
+  const lean = `namespace JJMath.Cohomology
+
+/--
+%%handwave
+name:
+  Degree-zero sheafified boundaries vanish
+statement:
+  A degree-zero singular cocycle whose sheafified class vanishes has zero class.
+proof:
+  Use local vanishing of locally constant zero-cochains.
+-/
+theorem openSingularCochainTop_homologyπ_zero_eq_zero_of_sheafified_boundary_subdivision :
+    True := by
+  trivial
+
+namespace Unicodeπ
+
+theorem theorem₂ : True := by
+  trivial
+
+end Unicodeπ
+
+end JJMath.Cohomology
+`;
+  const articleText = `@include{lean:${unicodeName}}`;
+  const declarations = parseLeanDocument(lean, "/workspace/Unicode.lean");
+  const article = parseArticleDocument(articleText, "/workspace/unicode.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+
+  assert.equal(declarations[0]?.name, unicodeName);
+  assert.equal(
+    declarations.find((declaration) => declaration.sourceName.endsWith("theorem₂"))?.name,
+    "JJMath.Cohomology.Unicodeπ.theorem₂"
+  );
+  assert.equal(index.resolve(`lean:${unicodeName}`)?.title, unicodeName);
+  assert.equal(article.includes[0]?.target, `lean:${unicodeName}`);
+
+  const html = renderArticleHtml(
+    articleText,
+    "/workspace/unicode.hw.md",
+    index,
+    (target) => `command:${target}`
+  );
+  assert.doesNotMatch(html, /Unresolved include/);
+  assert.match(html, new RegExp(`data-handwave-target="lean:${unicodeName}"`));
+});
+
 test("ignores comment prose while tracking Lean namespaces", () => {
   const declarations = parseLeanDocument(`namespace RelWP
 
@@ -388,14 +438,70 @@ test("resolves article keys relative to any workspace folder", () => {
   assert.equal(index.resolve("article:hyperbolic")?.title, "Hyperbolic Metrics");
 });
 
-test("reports unresolved links but leaves term links alone", () => {
+test("diagnoses Handwave links but leaves ordinary Markdown destinations alone", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
-  const article = parseArticleDocument(`${articleText}\n[monoid](term:monoid)\n`, "/workspace/natural-numbers.hw.md");
+  const ordinaryTargets = [
+    "https://willierushrush.github.io/posts/2020/05/second-countability/",
+    "ftp://example.com/paper.txt",
+    "file:///tmp/notes.pdf",
+    "future-scheme:resource",
+    "../references/local-note.md"
+  ];
+  const article = parseArticleDocument(
+    `${articleText}\n[monoid](term:monoid)\n` +
+      ordinaryTargets.map((target, index) => `[source ${index}](${target})`).join("\n"),
+    "/workspace/natural-numbers.hw.md"
+  );
   const index = new HandwaveIndex("/workspace", declarations, [article]);
   const diagnostics = collectDiagnostics(index, declarations, [article]);
 
   assert.equal(diagnostics.some((issue) => issue.message.includes("Missing.add_assoc")), true);
   assert.equal(diagnostics.some((issue) => issue.message.includes("term:monoid")), false);
+  for (const target of ordinaryTargets) {
+    assert.equal(diagnostics.some((issue) => issue.message.includes(target)), false);
+  }
+});
+
+test("only rewrites known Handwave navigation links", () => {
+  const ordinaryTargets = [
+    "https://willierushrush.github.io/posts/2020/05/second-countability/",
+    "ftp://example.com/paper.txt",
+    "file:///tmp/notes.pdf",
+    "future-scheme:resource",
+    "../references/local-note.md"
+  ];
+  const articleText = [
+    ...ordinaryTargets.map((target, index) => `[source ${index}](${target})`),
+    "[theorem](lean:my_add_assoc)"
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/rado.hw.md");
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const html = renderArticleHtml(
+    articleText,
+    "/workspace/rado.hw.md",
+    index,
+    (target) => `command:${target}`
+  );
+
+  for (const target of ordinaryTargets) {
+    assert.match(html, new RegExp(`href="${escapeRegExp(target)}"`));
+    assert.doesNotMatch(html, new RegExp(`href="command:${escapeRegExp(target)}"`));
+    assert.doesNotMatch(html, new RegExp(`data-handwave-target="${escapeRegExp(target)}"`));
+  }
+  assert.match(html, /href="command:lean:my_add_assoc"/);
+  assert.match(html, /data-handwave-target="lean:my_add_assoc"/);
+});
+
+test("keeps includes strict when their target is not a Handwave resource", () => {
+  const articleText = "@include{ftp://example.com/paper.txt}";
+  const article = parseArticleDocument(articleText, "/workspace/include.hw.md");
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const diagnostics = collectDiagnostics(index, [], [article]);
+
+  assert.equal(
+    diagnostics.some((issue) => issue.message.includes("Unsupported Handwave include target")),
+    true
+  );
 });
 
 test("slugifies section titles", () => {

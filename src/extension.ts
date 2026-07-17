@@ -9,6 +9,7 @@ import { parseLeanAxiomOutput } from "./handwave/leanAxiom";
 import { containsPosition } from "./handwave/position";
 import {
   blankLeanCommentsAndStrings,
+  isHandwaveNavigationTarget,
   normalizeHandwaveTag,
   parseArticleDocument,
   parseLeanDocument,
@@ -1149,11 +1150,14 @@ class HandwaveController
     const article = parseArticleDocument(document.getText(), document.uri.fsPath);
     return [...article.links, ...article.includes].map((ref) => {
       const target = ref.target;
+      const handwaveNavigation = isHandwaveNavigationTarget(target);
       const link = new vscode.DocumentLink(
         toVsCodeRange(ref.targetRange),
-        commandUri("handwave.openPreviewTarget", target, document.uri.fsPath)
+        handwaveNavigation
+          ? commandUri("handwave.openPreviewTarget", target, document.uri.fsPath)
+          : vscode.Uri.parse(target)
       );
-      link.tooltip = `Preview ${target}`;
+      link.tooltip = handwaveNavigation ? `Preview ${target}` : `Open ${target}`;
       return link;
     });
   }
@@ -1163,6 +1167,10 @@ class HandwaveController
     if (isArticleUri(document.uri)) {
       const ref = this.referenceAt(document, pos);
       if (!ref) {
+        return undefined;
+      }
+
+      if (!isHandwaveNavigationTarget(ref.target)) {
         return undefined;
       }
 

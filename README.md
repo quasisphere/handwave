@@ -12,6 +12,8 @@ the statement, proof idea, and role of the result. Handwave then connects those
 annotated declarations into article-style narratives, dependency views,
 backlinks, and Lean status badges.
 
+_This version of Handwave is a **vibe-coded prototype** that could later on be replaced by a more robust version._
+
 ## What Handwave Provides
 
 - An index of Lean declarations, Handwave articles, links, includes, and

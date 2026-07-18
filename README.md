@@ -14,6 +14,20 @@ backlinks, and Lean status badges.
 
 _This version of Handwave is a **vibe-coded prototype** that could later on be replaced by a more robust version._
 
+## Screenshots
+
+![The Handwave theorem explorer showing a dependency tree and theorem details.](screenshots/browser.png)
+
+*The theorem explorer shows a dependency tree and details about a chosen theorem.*
+
+![A Handwave summary article in which every theorem has a green checkmark.](screenshots/preview1.png)
+
+*A summary article rendered by Handwave. Handwave has checked that Lean seems happy, so all theorems have a green checkmark.*
+
+![A Handwave summary article with yellow checkmarks and a dependency tree leading to a sorry.](screenshots/preview2.png)
+
+*This time there are some yellow checkmarks. Hovering over one of the theorems opens a dependency tree showing the path to a sorry (red cross).*
+
 ## What Handwave Provides
 
 - An index of Lean declarations, Handwave articles, links, includes, and

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { HandwaveIndex, isIndexedLeanDeclaration } from "./index";
-import { renderCheckStatus, renderLeanDeclarationPreviewHtml } from "./renderer";
+import { renderCheckStatus } from "./renderer";
 import { LeanDeclaration } from "./types";
 
 export interface TheoremExplorerPayload {
@@ -27,7 +27,11 @@ export interface TheoremExplorerItem {
   dependents: TheoremExplorerLink[];
   references: TheoremExplorerLink[];
   statusHtml: string;
-  previewHtml: string;
+}
+
+export interface TheoremExplorerStatusUpdate {
+  name: string;
+  statusHtml: string;
 }
 
 export interface TheoremExplorerLink {
@@ -41,6 +45,7 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
 
   constructor(
     private readonly payloadProvider: () => TheoremExplorerPayload,
+    private readonly previewProvider: (name: string) => string | undefined,
     private readonly openPreviewTarget: (target: string) => Promise<void>,
     private readonly toggleTag: (target: string, tag: string) => Promise<void>,
     private readonly updateVisibleTheorems: (names: string[]) => Promise<void>
@@ -74,11 +79,48 @@ export class HandwaveTheoremExplorerProvider implements vscode.WebviewViewProvid
     void this.view?.webview.postMessage({ type: "setData", payload });
   }
 
+  setTag(target: string, tag: string, active: boolean): void {
+    if (!this.view?.visible) {
+      return;
+    }
+    void this.view.webview.postMessage({ type: "setTag", target, tag, active });
+  }
+
+  setStatuses(updates: readonly TheoremExplorerStatusUpdate[]): void {
+    if (!this.view?.visible || updates.length === 0) {
+      return;
+    }
+    void this.view.webview.postMessage({ type: "setStatuses", updates });
+  }
+
   private async handleMessage(message: unknown): Promise<void> {
     if (!message || typeof message !== "object") {
       return;
     }
-    const data = message as { type?: unknown; target?: unknown; tag?: unknown; names?: unknown };
+    const data = message as {
+      type?: unknown;
+      target?: unknown;
+      tag?: unknown;
+      names?: unknown;
+      name?: unknown;
+      requestId?: unknown;
+    };
+    if (
+      data.type === "requestPreview" &&
+      typeof data.name === "string" &&
+      typeof data.requestId === "number"
+    ) {
+      const html = this.previewProvider(data.name);
+      if (html !== undefined) {
+        void this.view?.webview.postMessage({
+          type: "setPreview",
+          name: data.name,
+          requestId: data.requestId,
+          html
+        });
+      }
+      return;
+    }
     if (data.type === "openPreview" && typeof data.target === "string") {
       void this.openPreviewTarget(data.target);
       return;
@@ -140,13 +182,7 @@ function theoremExplorerItem(
     dependencies: index.dependenciesForLean(declaration.name),
     dependents: [],
     references: articleReferencesForLean(index, declaration.name, workspaceRoots),
-    statusHtml: renderCheckStatus(index.checkStatusForLean(declaration.name)),
-    previewHtml: renderLeanDeclarationPreviewHtml(
-      declaration,
-      index,
-      () => "#",
-      () => "#"
-    )
+    statusHtml: renderCheckStatus(index.checkStatusForLean(declaration.name))
   };
 }
 
@@ -239,7 +275,7 @@ function relativeWorkspacePath(uri: string, workspaceRoots: readonly string[]): 
   return root ? path.relative(root, normalizedUri) : uri;
 }
 
-function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
+export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -532,7 +568,11 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       min-width: 1em;
       text-align: center;
     }
-    .graph-node > .check-status {
+    .graph-node-status {
+      line-height: 1.25;
+      text-align: center;
+    }
+    .graph-node-status > .check-status {
       line-height: 1.25;
       margin-right: 0;
     }
@@ -670,6 +710,8 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
   <script>
     const vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : undefined;
     let payload = ${jsonForScript(payload)};
+    let theoremMap = createTheoremMap(payload);
+    let publicTheoremList = payload.theorems.filter((theorem) => !theorem.isPrivate);
     let milestoneOnly = true;
     let selectedName = "";
     let searchSelection = undefined;
@@ -679,6 +721,9 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     let graphLayoutVersion = 0;
     let currentGraphLayout = undefined;
     let visibleTheoremKey = "";
+    let nextPreviewRequestId = 1;
+    const previewHtmlByName = new Map();
+    const pendingPreviewRequestIds = new Map();
 
     const search = document.getElementById("search");
     const suggestions = document.getElementById("suggestions");
@@ -687,12 +732,16 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     const graph = document.getElementById("graph");
     const preview = document.getElementById("preview");
 
-    function byName() {
+    function createTheoremMap(sourcePayload) {
       const result = new Map();
-      for (const theorem of payload.theorems) {
+      for (const theorem of sourcePayload.theorems) {
         result.set(theorem.name, theorem);
       }
       return result;
+    }
+
+    function byName() {
+      return theoremMap;
     }
 
     function theoremForTarget(target) {
@@ -739,7 +788,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       payload.milestoneCount = publicTheorems().filter((theorem) => theorem.milestone).length;
     }
 
-    function optimisticallyToggleTag(target, tag) {
+    function setTagState(target, tag, active) {
       if (tag !== "milestone") {
         return false;
       }
@@ -748,15 +797,23 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         return false;
       }
 
-      setTheoremMilestone(theorem, !theorem.milestone);
+      if (theorem.milestone === active) {
+        return false;
+      }
+
+      setTheoremMilestone(theorem, active);
       updatePayloadMilestoneCount();
-      renderSuggestions();
       renderExplorerGraph();
       return true;
     }
 
+    function optimisticallyToggleTag(target, tag) {
+      const theorem = theoremForTarget(target);
+      return theorem ? setTagState(target, tag, !theorem.milestone) : false;
+    }
+
     function publicTheorems() {
-      return payload.theorems.filter((theorem) => !theorem.isPrivate);
+      return publicTheoremList;
     }
 
     function exactTheorem(query, theorems) {
@@ -841,8 +898,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       if (!milestoneOnly || theorem.milestone) {
         return [{
           name,
-          viaHidden,
-          children: dependencyChildren(name, theoremMap, nextPath)
+          viaHidden
         }];
       }
       return theorem.dependencies.flatMap((dependencyName) =>
@@ -923,6 +979,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         edges: [...edges.values()],
         height: 80,
         nodes: orderedNodes,
+        nodesByName: nodes,
         nodeWidth,
         rowGap,
         width: (maxColumn + 1) * (nodeWidth + columnGap) - columnGap + 16
@@ -946,7 +1003,10 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       }
       const existing = nodes.get(name);
       if (existing) {
-        existing.column = Math.max(existing.column, column);
+        if (existing.column >= column) {
+          return;
+        }
+        existing.column = column;
       } else {
         nodes.set(name, { name, column, height: 46, x: 0, y: 0 });
       }
@@ -984,8 +1044,9 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
       }
 
       const columns = new Map();
+      const elements = canvas.querySelectorAll("[data-graph-node-index]");
       layout.nodes.forEach((node, index) => {
-        const element = canvas.querySelector('[data-graph-node-index="' + String(index) + '"]');
+        const element = elements[index];
         node.element = element;
         node.height = element ? Math.ceil(element.getBoundingClientRect().height) : 46;
         const list = columns.get(node.column) || [];
@@ -1087,8 +1148,8 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
     }
 
     function renderEdge(edge, layout, highlight) {
-      const from = layout.nodes.find((node) => node.name === edge.from);
-      const to = layout.nodes.find((node) => node.name === edge.to);
+      const from = layout.nodesByName.get(edge.from);
+      const to = layout.nodesByName.get(edge.to);
       if (!from || !to) {
         return "";
       }
@@ -1118,7 +1179,7 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         '" data-graph-node-index="' + String(index) +
         '" style="left: ' + String(node.x) + 'px; top: ' + String(node.y) +
         'px; width: ' + String(layout.nodeWidth) + 'px;">' +
-        (theorem.statusHtml || '') +
+        '<span class="graph-node-status">' + (theorem.statusHtml || '') + '</span>' +
         '<span class="' + starClass + '">' + star + '</span>' +
         '<span class="theorem-node-text"><span class="theorem-title">' + html(theorem.displayName) + '</span>' +
         '<span class="theorem-module">' + html(theorem.moduleName || theorem.relativePath) + '</span></span>' +
@@ -1297,8 +1358,62 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
         preview.innerHTML = '<p class="preview-empty">Select a theorem.</p>';
         return;
       }
-      preview.innerHTML = injectPreviewMilestoneControl(theorem.previewHtml, theorem) + renderViewerInfo(theorem);
+      const previewHtml = previewHtmlByName.get(theorem.name);
+      if (previewHtml === undefined) {
+        preview.innerHTML = '<p class="preview-empty">Loading theorem preview…</p>' + renderViewerInfo(theorem);
+        if (!pendingPreviewRequestIds.has(theorem.name)) {
+          const requestId = nextPreviewRequestId++;
+          pendingPreviewRequestIds.set(theorem.name, requestId);
+          vscode?.postMessage({ type: "requestPreview", name: theorem.name, requestId });
+        }
+        return;
+      }
+      preview.innerHTML = injectPreviewMilestoneControl(previewHtml, theorem) + renderViewerInfo(theorem);
       window.MathJax?.typesetPromise?.([preview]).catch(() => undefined);
+    }
+
+    function setPreview(name, requestId, previewHtml) {
+      if (pendingPreviewRequestIds.get(name) !== requestId) {
+        return;
+      }
+      pendingPreviewRequestIds.delete(name);
+      previewHtmlByName.set(name, previewHtml);
+      if (name === selectedName) {
+        renderPreview();
+      }
+    }
+
+    function setStatuses(updates) {
+      let selectedStatusChanged = false;
+      const graphNodesByName = new Map();
+      for (const node of graph.querySelectorAll("[data-select-theorem]")) {
+        graphNodesByName.set(node.dataset.selectTheorem || "", node);
+      }
+      for (const update of updates) {
+        if (!update || typeof update.name !== "string" || typeof update.statusHtml !== "string") {
+          continue;
+        }
+        const theorem = byName().get(update.name);
+        if (!theorem || theorem.statusHtml === update.statusHtml) {
+          continue;
+        }
+        theorem.statusHtml = update.statusHtml;
+        previewHtmlByName.delete(update.name);
+        if (update.name === selectedName) {
+          selectedStatusChanged = true;
+        }
+        const node = graphNodesByName.get(update.name);
+        if (node) {
+          const status = node.querySelector(".graph-node-status");
+          if (status) {
+            status.innerHTML = update.statusHtml;
+          }
+        }
+      }
+      if (selectedStatusChanged) {
+        pendingPreviewRequestIds.delete(selectedName);
+        renderPreview();
+      }
     }
 
     function injectPreviewMilestoneControl(previewHtml, theorem) {
@@ -1504,10 +1619,36 @@ function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): string {
 
     window.addEventListener("message", (event) => {
       const message = event.data || {};
+      if (
+        message.type === "setPreview" &&
+        typeof message.name === "string" &&
+        typeof message.requestId === "number" &&
+        typeof message.html === "string"
+      ) {
+        setPreview(message.name, message.requestId, message.html);
+        return;
+      }
+      if (message.type === "setStatuses" && Array.isArray(message.updates)) {
+        setStatuses(message.updates);
+        return;
+      }
+      if (
+        message.type === "setTag" &&
+        typeof message.target === "string" &&
+        typeof message.tag === "string" &&
+        typeof message.active === "boolean"
+      ) {
+        setTagState(message.target, message.tag, message.active);
+        return;
+      }
       if (message.type !== "setData" || !message.payload) {
         return;
       }
       payload = message.payload;
+      theoremMap = createTheoremMap(payload);
+      publicTheoremList = payload.theorems.filter((theorem) => !theorem.isPrivate);
+      previewHtmlByName.clear();
+      pendingPreviewRequestIds.clear();
       if (selectedName && !byName().has(selectedName)) {
         selectedName = "";
       }

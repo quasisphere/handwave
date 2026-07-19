@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { HandwaveIndex, isIndexedLeanDeclaration } from "../handwave/index";
-import { buildTheoremExplorerPayload } from "../handwave/explorer";
+import { buildTheoremExplorerPayload, renderTheoremExplorerHtml } from "../handwave/explorer";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import {
   applyLeanIleanArtifacts,
@@ -18,6 +18,7 @@ import {
   renderLeanDeclarationPreviewHtml,
   renderLeanDocumentHtml
 } from "../handwave/renderer";
+import { applySourceTextEdit, leanDeclarationTagToggleEdit } from "../handwave/tagEditor";
 
 const leanText = `/--
 %%handwave
@@ -355,6 +356,49 @@ theorem tagged_result : True := by
   assert.equal(hasHandwaveTag(declarations[0].doc, "milestone"), true);
   assert.equal(hasHandwaveTag(declarations[0].doc, "draft"), true);
   assert.equal(hasHandwaveTag(declarations[0].doc, "other"), false);
+});
+
+test("produces direct source edits when toggling Handwave declaration tags", () => {
+  const uri = "/workspace/Tagged.lean";
+  const source = `/--\r
+%%handwave\r
+tags:\r
+  draft\r
+statement:\r
+  A tagged theorem.\r
+-/\r
+theorem tagged_result : True := by\r
+  trivial\r
+`;
+  const declaration = parseLeanDocument(source, uri)[0];
+  const addEdit = leanDeclarationTagToggleEdit(source, uri, declaration.name, "milestone");
+  assert.ok(addEdit);
+  assert.ok(addEdit.end - addEdit.start < source.length);
+  const withMilestone = applySourceTextEdit(source, addEdit);
+  assert.deepEqual(parseLeanDocument(withMilestone, uri)[0].doc?.tags, ["draft", "milestone"]);
+  assert.match(withMilestone, /tags:\r\n  draft, milestone\r\nstatement:/);
+
+  const removeEdit = leanDeclarationTagToggleEdit(withMilestone, uri, declaration.name, "milestone");
+  assert.ok(removeEdit);
+  const withoutMilestone = applySourceTextEdit(withMilestone, removeEdit);
+  assert.equal(withoutMilestone, source);
+});
+
+test("creates a Handwave block when directly tagging an undocumented theorem", () => {
+  const uri = "/workspace/Bare.lean";
+  const source = `namespace Tagged
+
+  theorem bare_result : True := by
+    trivial
+
+end Tagged
+`;
+  const declaration = parseLeanDocument(source, uri)[0];
+  const edit = leanDeclarationTagToggleEdit(source, uri, declaration.name, "milestone");
+  assert.ok(edit);
+  const updated = applySourceTextEdit(source, edit);
+  assert.match(updated, /  \/--\n  %%handwave\n  tags:\n    milestone\n  -\/\n  theorem bare_result/);
+  assert.deepEqual(parseLeanDocument(updated, uri)[0].doc?.tags, ["milestone"]);
 });
 
 test("does not index shadow-tagged theorems or let them override ordinary declarations", () => {
@@ -805,6 +849,15 @@ theorem derived_theorem : True := by
   assert.deepEqual(base?.references.map((link) => link.target), ["article:notes/explorer.hw.md"]);
   assert.equal(base?.references[0]?.label, "notes/explorer.hw.md");
   assert.match(base?.statusHtml ?? "", /class="check-status check-status-checked"[^>]*>✓<\/span>/);
+  assert.equal(Object.hasOwn(base ?? {}, "previewHtml"), false);
+
+  const html = renderTheoremExplorerHtml(payload);
+  assert.match(html, /type: "requestPreview"/);
+  assert.match(html, /message\.type === "setPreview"/);
+  assert.match(html, /message\.type === "setStatuses"/);
+  assert.match(html, /graph-node-status/);
+  const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
+  assert.doesNotThrow(() => new Function(scripts.at(-1)?.[1] ?? ""));
 });
 
 test("renders theorem check status supplied by Lean diagnostics", () => {

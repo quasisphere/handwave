@@ -26,7 +26,14 @@ import {
   parseLeanDocument,
   parseTarget
 } from "./handwave/parser";
-import { leanDeclarationAnchorId, renderArticleHtml, renderLeanDocumentHtml } from "./handwave/renderer";
+import {
+  leanDeclarationAnchorId,
+  renderArticleHtml,
+  renderCheckStatus,
+  renderLeanDeclarationPreviewHtml,
+  renderLeanDocumentHtml
+} from "./handwave/renderer";
+import { applySourceTextEdit, leanDeclarationTagToggleEdit } from "./handwave/tagEditor";
 import {
   ArticleDocument,
   ArticleInclude,
@@ -52,6 +59,11 @@ interface PreviewHistoryEntry {
   uri: string;
   focusId?: string;
   target?: string;
+}
+
+interface IndexedSourceUpdateOptions {
+  leanMetadataOnly?: boolean;
+  refreshTheoremExplorer?: boolean;
 }
 
 interface LeanAxiomCheckRequest {
@@ -116,6 +128,7 @@ class HandwaveController
   private readonly disposables: vscode.Disposable[] = [];
   private readonly diagnostics = vscode.languages.createDiagnosticCollection("handwave");
   private readonly codeLensEmitter = new vscode.EventEmitter<void>();
+  private readonly indexStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
   private readonly leanProcessStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   private readonly theoremExplorerProvider: HandwaveTheoremExplorerProvider;
   private readonly previewPanels = new Map<string, HandwavePreviewState>();
@@ -126,6 +139,8 @@ class HandwaveController
   private readonly leanAxiomChecksRunning = new Set<string>();
   private readonly leanAxiomFailedGenerations = new Map<string, number>();
   private readonly theoremExplorerVisibleNames = new Set<string>();
+  private theoremExplorerStatusHtml = new Map<string, string>();
+  private readonly managedMetadataDocumentEdits = new Set<string>();
   private theoremExplorerVisibleKey = "";
   private declarations: LeanDeclaration[] = [];
   private articles: ArticleDocument[] = [];
@@ -137,6 +152,8 @@ class HandwaveController
   private axiomCheckTimer: NodeJS.Timeout | undefined;
   private compiledLeanChangeTimer: NodeJS.Timeout | undefined;
   private compiledLeanPollTimer: NodeJS.Timeout | undefined;
+  private indexStatusTimer: NodeJS.Timeout | undefined;
+  private indexStatusStartedAt: number | undefined;
   private leanProcessStatusTimer: NodeJS.Timeout | undefined;
   private leanProcessStartedAt: number | undefined;
   private leanProcessStatusLabel: string | undefined;
@@ -149,6 +166,7 @@ class HandwaveController
   private indexGeneration = 0;
   private activeRebuildGeneration: number | undefined;
   private compiledLeanArtifactsSnapshot: string | undefined;
+  private readonly managedSourceWrites = new Map<string, number>();
   private leanArtifactDependencyGraph = new Map<string, string[]>();
   private managedLeanArtifactRefreshUntil = 0;
   private nextPreviewKey = 1;
@@ -158,6 +176,7 @@ class HandwaveController
   constructor(private readonly context: vscode.ExtensionContext) {
     this.theoremExplorerProvider = new HandwaveTheoremExplorerProvider(
       () => this.theoremExplorerPayload(),
+      (name) => this.theoremExplorerPreview(name),
       (target) => this.openPreviewTarget(target),
       (target, tag) => this.toggleLeanDeclarationTag(target, tag),
       (names) => this.updateTheoremExplorerVisibleTheorems(names)
@@ -177,6 +196,7 @@ class HandwaveController
     this.disposables.push(
       this.diagnostics,
       this.codeLensEmitter,
+      this.indexStatusBar,
       this.leanProcessStatusBar,
       this.theoremExplorerProvider,
       vscode.window.registerWebviewViewProvider("handwave.theoremExplorer", this.theoremExplorerProvider),
@@ -200,6 +220,9 @@ class HandwaveController
       vscode.commands.registerCommand("handwave.openTarget", (target: string, fromUri?: string) => this.openTarget(target, fromUri)),
       vscode.workspace.onDidChangeTextDocument((event) => {
         if (isLeanOrArticle(event.document.uri)) {
+          if (isLeanUri(event.document.uri) && this.managedMetadataDocumentEdits.has(event.document.uri.fsPath)) {
+            return;
+          }
           if (isLeanUri(event.document.uri)) {
             this.markLeanAxiomChecksStale();
           }
@@ -208,6 +231,9 @@ class HandwaveController
       }),
       vscode.workspace.onDidSaveTextDocument((document) => {
         if (isLeanOrArticle(document.uri)) {
+          if (isLeanUri(document.uri) && this.managedMetadataDocumentEdits.has(document.uri.fsPath)) {
+            return;
+          }
           if (isLeanUri(document.uri)) {
             this.markLeanAxiomChecksStale();
           }
@@ -259,6 +285,9 @@ class HandwaveController
           this.scheduleFullRebuild();
         }),
         watcher.onDidChange((uri) => {
+          if (this.isManagedSourceWrite(uri)) {
+            return;
+          }
           if (isLeanUri(uri)) {
             this.markLeanAxiomChecksStale();
           }
@@ -298,6 +327,7 @@ class HandwaveController
     if (this.compiledLeanPollTimer) {
       clearInterval(this.compiledLeanPollTimer);
     }
+    this.clearIndexStatus();
     this.cancelActiveLeanAxiomProbe();
     this.clearLeanProcessStatus();
     for (const disposable of this.disposables) {
@@ -343,8 +373,7 @@ class HandwaveController
       if (workspaceFolders.length === 0) {
         return;
       }
-      this.rebuildCachedIndex(workspaceFolders);
-      void this.refreshPreviews();
+      this.refreshLeanStatusViews();
       void this.triggerLeanChecksForOpenPreviews();
     }, 500);
   }
@@ -361,8 +390,12 @@ class HandwaveController
       this.compiledLeanArtifactsSnapshot =
         this.compiledLeanArtifactSnapshotForOpenPreviews() ?? this.compiledLeanArtifactsSnapshot;
       this.markLeanAxiomChecksStale();
-      this.scheduleFullRebuild();
-      void this.triggerLeanChecksForOpenPreviews();
+      const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+      if (workspaceFolders.length > 0) {
+        void this.refreshLeanArtifactMetadata(workspaceFolders).then(() =>
+          this.triggerLeanChecksForOpenPreviews()
+        );
+      }
     }, 750);
   }
 
@@ -370,6 +403,28 @@ class HandwaveController
     return vscode.workspace.textDocuments.find((document) =>
       document.uri.scheme === uri.scheme && document.uri.fsPath === uri.fsPath
     );
+  }
+
+  private markManagedSourceWrite(uri: vscode.Uri): void {
+    const until = Date.now() + 3000;
+    this.managedSourceWrites.set(uri.fsPath, until);
+    setTimeout(() => {
+      if (this.managedSourceWrites.get(uri.fsPath) === until) {
+        this.managedSourceWrites.delete(uri.fsPath);
+      }
+    }, 3000);
+  }
+
+  private isManagedSourceWrite(uri: vscode.Uri): boolean {
+    const until = this.managedSourceWrites.get(uri.fsPath);
+    if (!until) {
+      return false;
+    }
+    if (Date.now() >= until) {
+      this.managedSourceWrites.delete(uri.fsPath);
+      return false;
+    }
+    return true;
   }
 
   private registerCompiledLeanArtifactWatchers(): void {
@@ -410,130 +465,201 @@ class HandwaveController
     }
   }
 
+  private beginIndexStatus(): void {
+    if (this.indexStatusStartedAt === undefined) {
+      this.indexStatusStartedAt = Date.now();
+    }
+    this.updateIndexStatus();
+    if (!this.indexStatusTimer) {
+      this.indexStatusTimer = setInterval(() => this.updateIndexStatus(), 1000);
+    }
+    this.indexStatusBar.show();
+  }
+
+  private updateIndexStatus(): void {
+    if (this.indexStatusStartedAt === undefined) {
+      return;
+    }
+    const elapsed = formatDuration(Date.now() - this.indexStatusStartedAt);
+    this.indexStatusBar.text = `$(sync~spin) Handwave Indexing ${elapsed}`;
+    this.indexStatusBar.tooltip = "Handwave is indexing Lean declarations and articles.";
+  }
+
+  private finishIndexing(rebuildGeneration: number): void {
+    if (this.activeRebuildGeneration !== rebuildGeneration) {
+      return;
+    }
+    this.activeRebuildGeneration = undefined;
+    this.isIndexing = false;
+    this.clearIndexStatus();
+  }
+
+  private clearIndexStatus(): void {
+    if (this.indexStatusTimer) {
+      clearInterval(this.indexStatusTimer);
+      this.indexStatusTimer = undefined;
+    }
+    this.indexStatusStartedAt = undefined;
+    this.indexStatusBar.hide();
+  }
+
   async rebuildIndex(showNotification = false): Promise<void> {
     const rebuildGeneration = ++this.indexGeneration;
     this.activeRebuildGeneration = rebuildGeneration;
-    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-    if (workspaceFolders.length === 0) {
-      if (this.activeRebuildGeneration === rebuildGeneration) {
-        this.activeRebuildGeneration = undefined;
-        this.isIndexing = false;
-      }
-      this.declarations = [];
-      this.articles = [];
-      this.index = new HandwaveIndex("", [], []);
-      this.diagnostics.clear();
-      this.refreshTheoremExplorer();
-      return;
-    }
-
     this.isIndexing = true;
+    this.beginIndexStatus();
     void this.refreshPreviews();
-
-    const config = vscode.workspace.getConfiguration("handwave");
-    const leanGlobs = config.get<string[]>("leanGlobs", ["**/*.lean"]);
-    const articleGlobs = config.get<string[]>("articleGlobs", ["**/*.hw.md", "**/*.hw"]);
-    const excludeGlob = config.get<string>("excludeGlob", "**/{node_modules,out,.git,.jj,.lake}/**");
-    const leanUris = await findWorkspaceFiles(leanGlobs, workspaceFolders, excludeGlob);
-    const articleUris = await findWorkspaceFiles(articleGlobs, workspaceFolders, excludeGlob);
-
-    let declarations: LeanDeclaration[] = [];
-    for (const uri of leanUris) {
-      const text = await readWorkspaceText(uri);
-      declarations.push(...parseLeanDocument(text, uri.fsPath));
-    }
-    declarations = declarations.filter(isIndexedLeanDeclaration);
-
-    const artifactMetadata = await loadLeanArtifactMetadata(declarations, workspaceFolders);
-    declarations = artifactMetadata.declarations;
-
-    const articles: ArticleDocument[] = [];
-    for (const uri of articleUris) {
-      const text = await readWorkspaceText(uri);
-      articles.push(parseArticleDocument(text, uri.fsPath));
-    }
-
-    if (rebuildGeneration !== this.indexGeneration) {
-      if (this.activeRebuildGeneration === rebuildGeneration) {
-        this.scheduleFullRebuild();
+    try {
+      const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+      if (workspaceFolders.length === 0) {
+        this.finishIndexing(rebuildGeneration);
+        this.declarations = [];
+        this.articles = [];
+        this.index = new HandwaveIndex("", [], []);
+        this.diagnostics.clear();
+        this.refreshTheoremExplorer();
+        return;
       }
-      return;
-    }
 
-    this.declarations = declarations;
-    this.articles = articles;
-    this.leanArtifactDependencyGraph = artifactMetadata.dependencyGraph;
-    this.pruneLeanAxiomChecks(declarations);
-    await this.hydrateLeanArtifactCache(declarations, workspaceFolders);
-    if (rebuildGeneration !== this.indexGeneration) {
-      if (this.activeRebuildGeneration === rebuildGeneration) {
-        this.scheduleFullRebuild();
+      const config = vscode.workspace.getConfiguration("handwave");
+      const leanGlobs = config.get<string[]>("leanGlobs", ["**/*.lean"]);
+      const articleGlobs = config.get<string[]>("articleGlobs", ["**/*.hw.md", "**/*.hw"]);
+      const excludeGlob = config.get<string>("excludeGlob", "**/{node_modules,out,.git,.jj,.lake}/**");
+      const leanUris = await findWorkspaceFiles(leanGlobs, workspaceFolders, excludeGlob);
+      const articleUris = await findWorkspaceFiles(articleGlobs, workspaceFolders, excludeGlob);
+
+      let declarations: LeanDeclaration[] = [];
+      for (const uri of leanUris) {
+        const text = await readWorkspaceText(uri);
+        declarations.push(...parseLeanDocument(text, uri.fsPath));
       }
-      return;
-    }
-    this.index = new HandwaveIndex(
-      workspaceFolders.map((folder) => folder.uri.fsPath),
-      declarations,
-      articles,
-      this.currentLeanCheckStatuses(declarations),
-      this.leanArtifactDependencyGraph
-    );
+      declarations = declarations.filter(isIndexedLeanDeclaration);
 
-    if (config.get<boolean>("enableDiagnostics", true)) {
-      this.publishDiagnostics(collectDiagnostics(this.index, declarations, articles));
-    } else {
-      this.diagnostics.clear();
-    }
+      const artifactMetadata = await loadLeanArtifactMetadata(declarations, workspaceFolders);
+      declarations = artifactMetadata.declarations;
 
-    this.isIndexing = false;
-    if (this.activeRebuildGeneration === rebuildGeneration) {
-      this.activeRebuildGeneration = undefined;
-    }
-    this.codeLensEmitter.fire();
-    this.refreshTheoremExplorer();
-    void this.triggerLeanChecksForOpenPreviews();
-    await this.refreshPreviews();
+      const articles: ArticleDocument[] = [];
+      for (const uri of articleUris) {
+        const text = await readWorkspaceText(uri);
+        articles.push(parseArticleDocument(text, uri.fsPath));
+      }
 
-    if (showNotification) {
-      void vscode.window.showInformationMessage(
-        `Handwave indexed ${declarations.length} Lean declarations and ${articles.length} articles.`
+      if (rebuildGeneration !== this.indexGeneration) {
+        if (this.activeRebuildGeneration === rebuildGeneration) {
+          this.scheduleFullRebuild();
+        }
+        return;
+      }
+
+      this.declarations = declarations;
+      this.articles = articles;
+      this.leanArtifactDependencyGraph = artifactMetadata.dependencyGraph;
+      this.pruneLeanAxiomChecks(declarations);
+      await this.hydrateLeanArtifactCache(declarations, workspaceFolders);
+      if (rebuildGeneration !== this.indexGeneration) {
+        if (this.activeRebuildGeneration === rebuildGeneration) {
+          this.scheduleFullRebuild();
+        }
+        return;
+      }
+      this.index = new HandwaveIndex(
+        workspaceFolders.map((folder) => folder.uri.fsPath),
+        declarations,
+        articles,
+        this.currentLeanCheckStatuses(declarations),
+        this.leanArtifactDependencyGraph
       );
+
+      if (config.get<boolean>("enableDiagnostics", true)) {
+        this.publishDiagnostics(collectDiagnostics(this.index, declarations, articles));
+      } else {
+        this.diagnostics.clear();
+      }
+
+      this.finishIndexing(rebuildGeneration);
+      this.codeLensEmitter.fire();
+      this.refreshTheoremExplorer();
+      void this.triggerLeanChecksForOpenPreviews();
+      await this.refreshPreviews();
+
+      if (showNotification) {
+        void vscode.window.showInformationMessage(
+          `Handwave indexed ${declarations.length} Lean declarations and ${articles.length} articles.`
+        );
+      }
+    } finally {
+      if (
+        this.activeRebuildGeneration === rebuildGeneration &&
+        this.rebuildTimer === undefined
+      ) {
+        this.finishIndexing(rebuildGeneration);
+        void this.refreshPreviews();
+      }
     }
   }
 
-  private async updateIndexedDocument(document: vscode.TextDocument): Promise<void> {
+  private async updateIndexedDocument(
+    document: vscode.TextDocument,
+    options: IndexedSourceUpdateOptions = {}
+  ): Promise<void> {
+    await this.updateIndexedSource(document.uri, document.getText(), options);
+  }
+
+  private async updateIndexedSource(
+    uri: vscode.Uri,
+    text: string,
+    options: IndexedSourceUpdateOptions = {}
+  ): Promise<void> {
     this.indexGeneration++;
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     if (workspaceFolders.length === 0) {
       return;
     }
 
-    if (isArticleUri(document.uri)) {
-      const article = parseArticleDocument(document.getText(), document.uri.fsPath);
+    if (isArticleUri(uri)) {
+      const article = parseArticleDocument(text, uri.fsPath);
       this.articles = replaceByUri(this.articles, article);
       this.rebuildCachedIndex(workspaceFolders);
       this.refreshDiagnostics();
       void this.triggerLeanChecksForIncludedTheorems([article]);
       this.codeLensEmitter.fire();
-      await this.refreshPreviewsForUri(document.uri);
+      await this.refreshPreviewsForUri(uri);
       return;
     }
 
-    if (isLeanUri(document.uri)) {
-      const declarations = parseLeanDocument(document.getText(), document.uri.fsPath)
+    if (isLeanUri(uri)) {
+      let declarations = parseLeanDocument(text, uri.fsPath)
         .filter(isIndexedLeanDeclaration);
-      for (const declaration of this.declarations) {
-        if (declaration.uri === document.uri.fsPath) {
+      const previousDeclarations = this.declarations.filter((declaration) => declaration.uri === uri.fsPath);
+      if (options.leanMetadataOnly) {
+        declarations = declarations.map((declaration) => {
+          const previous = previousDeclarations.find((candidate) =>
+            candidate.name === declaration.name ||
+            (candidate.isPrivate && declaration.isPrivate && candidate.sourceName === declaration.sourceName)
+          );
+          return previous
+            ? {
+              ...declaration,
+              name: previous.name,
+              artifactName: previous.artifactName,
+              artifactModule: previous.artifactModule
+            }
+            : declaration;
+        });
+      } else {
+        for (const declaration of previousDeclarations) {
           this.leanArtifactDependencyGraph.delete(declaration.name);
         }
       }
       this.declarations = [
-        ...this.declarations.filter((declaration) => declaration.uri !== document.uri.fsPath),
+        ...this.declarations.filter((declaration) => declaration.uri !== uri.fsPath),
         ...declarations
       ];
-      this.rebuildCachedIndex(workspaceFolders);
+      this.rebuildCachedIndex(workspaceFolders, options.refreshTheoremExplorer ?? true);
       this.refreshDiagnostics();
-      void this.triggerLeanChecksForOpenPreviews();
+      if (!options.leanMetadataOnly) {
+        void this.triggerLeanChecksForOpenPreviews();
+      }
       this.codeLensEmitter.fire();
       await this.refreshPreviews();
     }
@@ -686,9 +812,13 @@ class HandwaveController
     // Lake has just validated these artifacts by content hash, so mtimes are
     // irrelevant (for example after touching an otherwise unchanged source).
     const metadata = await loadLeanArtifactMetadata(this.declarations, workspaceFolders, false);
+    const dependencyGraphChanged = !stringArrayMapsEqual(
+      this.leanArtifactDependencyGraph,
+      metadata.dependencyGraph
+    );
     this.declarations = metadata.declarations;
     this.leanArtifactDependencyGraph = metadata.dependencyGraph;
-    this.rebuildCachedIndex(workspaceFolders);
+    this.rebuildCachedIndex(workspaceFolders, dependencyGraphChanged);
   }
 
   private async persistLeanArtifactExtractions(
@@ -720,7 +850,10 @@ class HandwaveController
     await writeLeanArtifactCache(root, cache);
   }
 
-  private rebuildCachedIndex(workspaceFolders: readonly vscode.WorkspaceFolder[]): void {
+  private rebuildCachedIndex(
+    workspaceFolders: readonly vscode.WorkspaceFolder[],
+    refreshTheoremExplorer = true
+  ): void {
     this.index = new HandwaveIndex(
       workspaceFolders.map((folder) => folder.uri.fsPath),
       this.declarations,
@@ -728,12 +861,48 @@ class HandwaveController
       this.currentLeanCheckStatuses(this.declarations),
       this.leanArtifactDependencyGraph
     );
-    this.refreshTheoremExplorer();
+    if (refreshTheoremExplorer) {
+      this.refreshTheoremExplorer();
+    }
   }
 
   private theoremExplorerPayload() {
     const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
-    return buildTheoremExplorerPayload(this.index, this.declarations, workspaceRoots);
+    const payload = buildTheoremExplorerPayload(this.index, this.declarations, workspaceRoots);
+    this.theoremExplorerStatusHtml = new Map(
+      payload.theorems.map((theorem) => [theorem.name, theorem.statusHtml])
+    );
+    return payload;
+  }
+
+  private theoremExplorerPreview(name: string): string | undefined {
+    const declaration = this.index.leanDeclarations.get(name);
+    if (!declaration || !isTheoremLikeDeclaration(declaration)) {
+      return undefined;
+    }
+    return renderLeanDeclarationPreviewHtml(
+      declaration,
+      this.index,
+      () => "#",
+      () => "#"
+    );
+  }
+
+  private refreshTheoremExplorerStatuses(): void {
+    const nextStatuses = new Map<string, string>();
+    const updates: Array<{ name: string; statusHtml: string }> = [];
+    for (const declaration of this.declarations) {
+      if (!isIndexedLeanDeclaration(declaration) || !isTheoremLikeDeclaration(declaration)) {
+        continue;
+      }
+      const statusHtml = renderCheckStatus(this.index.checkStatusForLean(declaration.name));
+      nextStatuses.set(declaration.name, statusHtml);
+      if (this.theoremExplorerStatusHtml.get(declaration.name) !== statusHtml) {
+        updates.push({ name: declaration.name, statusHtml });
+      }
+    }
+    this.theoremExplorerStatusHtml = nextStatuses;
+    this.theoremExplorerProvider.setStatuses(updates);
   }
 
   private refreshTheoremExplorer(): void {
@@ -766,7 +935,7 @@ class HandwaveController
       return;
     }
 
-    await this.triggerLeanChecksForDeclarations(declarations);
+    await this.triggerLeanChecksForDeclarations(declarations, false);
   }
 
   private currentLeanCheckStatuses(declarations: readonly LeanDeclaration[]): Map<string, LeanDeclarationCheckStatus> {
@@ -826,14 +995,17 @@ class HandwaveController
   }
 
   private async triggerLeanChecksForDeclarations(
-    declarations: readonly LeanDeclaration[]
+    declarations: readonly LeanDeclaration[],
+    refreshViews = true
   ): Promise<void> {
     // Opening a hidden Lean document activates a Lean LSP file worker. Keep the
     // default subprocess backend independent of the language server.
     if (this.usesLeanServerDiagnostics()) {
       await this.openLeanDocumentsForDeclarations(declarations);
     }
-    this.refreshLeanStatusViews();
+    if (refreshViews) {
+      this.refreshLeanStatusViews();
+    }
     this.refreshLeanAxiomDemandForOpenPreviews();
   }
 
@@ -869,7 +1041,8 @@ class HandwaveController
     if (workspaceFolders.length === 0) {
       return;
     }
-    this.rebuildCachedIndex(workspaceFolders);
+    this.rebuildCachedIndex(workspaceFolders, false);
+    this.refreshTheoremExplorerStatuses();
     void this.refreshPreviews();
   }
 
@@ -1789,30 +1962,81 @@ class HandwaveController
     }
 
     const uri = vscode.Uri.file(indexedDeclaration.uri);
-    const document = await vscode.workspace.openTextDocument(uri);
-    const declaration = parseLeanDocument(document.getText(), uri.fsPath)
-      .find((item) => item.name === indexedDeclaration.name);
-    if (!declaration) {
+    const document = this.openTextDocumentForUri(uri);
+    let source: string;
+    try {
+      source = document?.getText() ??
+        Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+    } catch (error) {
+      void vscode.window.showWarningMessage(`Handwave could not read ${uri.fsPath}: ${String(error)}`);
+      return;
+    }
+
+    const sourceEdit = leanDeclarationTagToggleEdit(source, uri.fsPath, indexedDeclaration.name, tag);
+    if (!sourceEdit) {
       void vscode.window.showWarningMessage(`Handwave theorem not found: ${rawTarget}`);
       return;
     }
 
-    const edit = new vscode.WorkspaceEdit();
-    applyToggleHandwaveTagEdit(edit, document, declaration, tag);
-    const applied = await vscode.workspace.applyEdit(edit);
-    if (!applied) {
-      void vscode.window.showWarningMessage(`Handwave could not update tags for ${rawTarget}.`);
+    if (!document) {
+      const updatedSource = applySourceTextEdit(source, sourceEdit);
+      try {
+        this.markManagedSourceWrite(uri);
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(updatedSource, "utf8"));
+      } catch (error) {
+        this.managedSourceWrites.delete(uri.fsPath);
+        void vscode.window.showWarningMessage(`Handwave could not update tags for ${rawTarget}: ${String(error)}`);
+        return;
+      }
+
+      await this.updateIndexedSource(uri, updatedSource, {
+        leanMetadataOnly: true,
+        refreshTheoremExplorer: false
+      });
+      const updatedDeclaration = this.index.leanDeclarations.get(indexedDeclaration.name);
+      this.theoremExplorerProvider.setTag(
+        `lean:${indexedDeclaration.name}`,
+        tag,
+        Boolean(updatedDeclaration?.doc?.tags.includes(tag))
+      );
       return;
     }
 
-    void this.updateIndexedDocument(document).catch(() => undefined);
-    void document.save().then((saved) => {
-      if (!saved) {
-        void vscode.window.showWarningMessage(`Handwave updated tags for ${rawTarget}, but could not save the file.`);
+    const wasDirty = document.isDirty;
+    if (!wasDirty) {
+      this.managedMetadataDocumentEdits.add(uri.fsPath);
+    }
+    try {
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(
+        uri,
+        new vscode.Range(document.positionAt(sourceEdit.start), document.positionAt(sourceEdit.end)),
+        sourceEdit.text
+      );
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (!applied) {
+        void vscode.window.showWarningMessage(`Handwave could not update tags for ${rawTarget}.`);
+        return;
       }
-    }, () => {
-      void vscode.window.showWarningMessage(`Handwave updated tags for ${rawTarget}, but could not save the file.`);
-    });
+
+      await this.updateIndexedDocument(document, wasDirty
+        ? {}
+        : { leanMetadataOnly: true, refreshTheoremExplorer: false });
+      if (!wasDirty) {
+        const updatedDeclaration = this.index.leanDeclarations.get(indexedDeclaration.name);
+        this.theoremExplorerProvider.setTag(
+          `lean:${indexedDeclaration.name}`,
+          tag,
+          Boolean(updatedDeclaration?.doc?.tags.includes(tag))
+        );
+        this.markManagedSourceWrite(uri);
+        if (!(await document.save())) {
+          void vscode.window.showWarningMessage(`Handwave updated tags for ${rawTarget}, but could not save the file.`);
+        }
+      }
+    } finally {
+      this.managedMetadataDocumentEdits.delete(uri.fsPath);
+    }
   }
 
   private async openPreviewTarget(
@@ -2259,178 +2483,6 @@ function collectLeanSourceCheckStatuses(
     }
   }
   return statuses;
-}
-
-function applyToggleHandwaveTagEdit(
-  edit: vscode.WorkspaceEdit,
-  document: vscode.TextDocument,
-  declaration: LeanDeclaration,
-  tag: string
-): void {
-  const currentTags = declaration.doc?.tags ?? [];
-  const hasTag = currentTags.includes(tag);
-  const nextTags = hasTag
-    ? currentTags.filter((item) => item !== tag)
-    : [...currentTags, tag];
-
-  if (declaration.doc) {
-    applyHandwaveDocTagsEdit(edit, document, declaration, nextTags);
-    return;
-  }
-
-  const text = document.getText();
-  const declarationLineStart = document.offsetAt(new vscode.Position(declaration.range.start.line, 0));
-  const declarationStart = document.offsetAt(toVsCodeRange(declaration.range).start);
-  const indent = text.slice(declarationLineStart, declarationStart).match(/^[ \t]*/)?.[0] ?? "";
-  edit.insert(
-    document.uri,
-    new vscode.Position(declaration.range.start.line, 0),
-    handwaveDocBlockWithTags(nextTags, indent, documentNewline(document))
-  );
-}
-
-function applyHandwaveDocTagsEdit(
-  edit: vscode.WorkspaceEdit,
-  document: vscode.TextDocument,
-  declaration: LeanDeclaration,
-  tags: readonly string[]
-): void {
-  const doc = declaration.doc;
-  if (!doc) {
-    return;
-  }
-
-  const text = document.getText();
-  const docStart = document.offsetAt(toVsCodeRange(doc.range).start);
-  const docEnd = document.offsetAt(toVsCodeRange(doc.range).end);
-  const newline = documentNewline(document);
-  const closeStart = handwaveDocCloseStart(text, docStart, docEnd);
-  const closeLineStart = lineStartOffset(text, closeStart);
-  const fieldRange = findHandwaveFieldRange(text, docStart, closeStart, "tags");
-
-  if (tags.length === 0) {
-    if (fieldRange) {
-      edit.delete(document.uri, new vscode.Range(
-        document.positionAt(fieldRange.start),
-        document.positionAt(fieldRange.end)
-      ));
-    }
-    return;
-  }
-
-  const fieldText = handwaveFieldBlock(
-    fieldRange?.prefix ?? defaultHandwaveFieldPrefix(text, docStart, closeStart),
-    "tags",
-    tags.join(", "),
-    newline
-  );
-  if (fieldRange) {
-    edit.replace(
-      document.uri,
-      new vscode.Range(document.positionAt(fieldRange.start), document.positionAt(fieldRange.end)),
-      fieldText
-    );
-    return;
-  }
-
-  edit.insert(document.uri, document.positionAt(closeLineStart), fieldText);
-}
-
-function handwaveDocBlockWithTags(tags: readonly string[], indent: string, newline: string): string {
-  return [
-    `${indent}/--`,
-    `${indent}%%handwave`,
-    `${indent}tags:`,
-    `${indent}  ${tags.join(", ")}`,
-    `${indent}-/`,
-    ""
-  ].join(newline);
-}
-
-interface HandwaveFieldRange {
-  start: number;
-  end: number;
-  prefix: string;
-}
-
-function findHandwaveFieldRange(
-  text: string,
-  docStart: number,
-  docCloseStart: number,
-  key: string
-): HandwaveFieldRange | undefined {
-  let offset = docStart;
-  let fieldStart: number | undefined;
-  let fieldPrefix = "";
-
-  while (offset < docCloseStart) {
-    const { line, nextOffset } = sourceLineAt(text, offset);
-    const prefix = handwaveLinePrefix(line);
-    const cleaned = line.slice(prefix.length);
-    const keyValue = /^([A-Za-z0-9_.-]+):(?:\s*(.*))?$/.exec(cleaned);
-
-    if (keyValue) {
-      if (fieldStart !== undefined) {
-        return { start: fieldStart, end: offset, prefix: fieldPrefix };
-      }
-
-      if (keyValue[1] === key) {
-        fieldStart = offset;
-        fieldPrefix = prefix;
-      }
-    }
-
-    offset = nextOffset;
-  }
-
-  if (fieldStart === undefined) {
-    return undefined;
-  }
-
-  return { start: fieldStart, end: lineStartOffset(text, docCloseStart), prefix: fieldPrefix };
-}
-
-function defaultHandwaveFieldPrefix(text: string, docStart: number, docCloseStart: number): string {
-  let offset = docStart;
-  while (offset < docCloseStart) {
-    const { line, nextOffset } = sourceLineAt(text, offset);
-    const prefix = handwaveLinePrefix(line);
-    const cleaned = line.slice(prefix.length).trim();
-    if (/^[A-Za-z0-9_.-]+:/.test(cleaned)) {
-      return prefix;
-    }
-    offset = nextOffset;
-  }
-  return "";
-}
-
-function handwaveFieldBlock(prefix: string, key: string, value: string, newline: string): string {
-  const valueLines = value.split(/\r?\n/).map((line) => `${prefix}  ${line}`);
-  return [`${prefix}${key}:`, ...valueLines, ""].join(newline);
-}
-
-function handwaveDocCloseStart(text: string, docStart: number, docEnd: number): number {
-  const closeRelative = text.slice(docStart, docEnd).lastIndexOf("-/");
-  return closeRelative >= 0 ? docStart + closeRelative : docEnd;
-}
-
-function sourceLineAt(text: string, offset: number): { line: string; nextOffset: number } {
-  const newline = text.indexOf("\n", offset);
-  const end = newline >= 0 ? newline : text.length;
-  const line = text.slice(offset, end).replace(/\r$/, "");
-  return { line, nextOffset: newline >= 0 ? newline + 1 : text.length };
-}
-
-function lineStartOffset(text: string, offset: number): number {
-  return text.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
-}
-
-function handwaveLinePrefix(line: string): string {
-  return /^(\s*[-*]?\s?)/.exec(line)?.[1] ?? "";
-}
-
-function documentNewline(document: vscode.TextDocument): "\n" | "\r\n" {
-  return document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n";
 }
 
 function comparePrioritizedLeanDeclarations(
@@ -3351,6 +3403,22 @@ function leanCheckStatusesEqual(
 
 function stringArraysEqual(first: readonly string[], second: readonly string[]): boolean {
   return first.length === second.length && first.every((value, index) => value === second[index]);
+}
+
+function stringArrayMapsEqual(
+  first: ReadonlyMap<string, readonly string[]>,
+  second: ReadonlyMap<string, readonly string[]>
+): boolean {
+  if (first.size !== second.size) {
+    return false;
+  }
+  for (const [name, values] of first) {
+    const otherValues = second.get(name);
+    if (!otherValues || !stringArraysEqual(values, otherValues)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function formatDuration(durationMs: number): string {

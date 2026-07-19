@@ -21,7 +21,8 @@ export class HandwaveIndex {
     workspaceRoots: string | string[],
     declarations: LeanDeclaration[],
     articles: ArticleDocument[],
-    checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus> = new Map()
+    checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus> = new Map(),
+    artifactDependencyGraph: ReadonlyMap<string, string[]> = new Map()
   ) {
     this.workspaceRoots = (Array.isArray(workspaceRoots) ? workspaceRoots : [workspaceRoots]).filter(Boolean);
     this.checkStatuses = checkStatuses;
@@ -29,7 +30,11 @@ export class HandwaveIndex {
     for (const declaration of declarations) {
       this.leanDeclarations.set(declaration.name, declaration);
     }
-    this.leanDependencyGraph = collectLeanDependencyGraph(declarations);
+    const sourceDependencyGraph = collectLeanDependencyGraph(declarations);
+    for (const [name, dependencies] of artifactDependencyGraph) {
+      sourceDependencyGraph.set(name, [...dependencies]);
+    }
+    this.leanDependencyGraph = sourceDependencyGraph;
 
     for (const article of articles) {
       this.articles.set(article.uri, article);

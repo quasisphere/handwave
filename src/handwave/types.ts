@@ -23,6 +23,10 @@ export interface HandwaveDoc {
 export interface LeanDeclaration {
   name: string;
   sourceName: string;
+  /** The exact constant name serialized by Lean, including private-name mangling. */
+  artifactName?: string;
+  /** The Lean module recorded by the declaration's `.ilean` file. */
+  artifactModule?: string;
   kind: string;
   isPrivate: boolean;
   statement: string;

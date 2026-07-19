@@ -19,6 +19,15 @@
     "onView:handwave.theoremExplorer"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Source browsing remains available, but Handwave does not execute Lake or Lean until the workspace is trusted.",
+      "restrictedConfigurations": [
+        "handwave.autoBuildLeanArtifacts"
+      ]
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -128,7 +137,7 @@
         "handwave.enableLeanDependencyChecks": {
           "type": "boolean",
           "default": true,
-          "description": "Use Lean axiom probes to decide whether theorem dependencies transitively depend on sorryAx. When disabled, Handwave only uses Lean LSP diagnostics for theorem badges."
+          "description": "Use Lean build artifacts to decide whether theorem dependencies transitively depend on sorryAx. When disabled, Handwave performs source-only checks and does not launch Lean in the background."
         },
         "handwave.leanDependencyCheckBackend": {
           "type": "string",
@@ -137,13 +146,24 @@
             "leanServer"
           ],
           "default": "subprocess",
-          "description": "Backend for Lean dependency checks. 'subprocess' runs optimized lake env lean probes; 'leanServer' asks the running Lean language server for #print axioms diagnostics."
+          "description": "Backend for Lean dependency checks. 'subprocess' builds/reads Lean artifacts with one cached lake env lean extractor and never opens hidden Lean documents; 'leanServer' asks the running Lean language server for #print axioms diagnostics."
         },
         "handwave.leanDependencyCheckDelayMs": {
           "type": "number",
           "default": 2500,
           "minimum": 0,
-          "description": "Delay before running Lean dependency checks after a theorem has clean Lean LSP diagnostics."
+          "description": "Delay before running queued Lean dependency checks."
+        },
+        "handwave.autoBuildLeanArtifacts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically ask Lake to build the required .olean and .ilean artifacts before an on-demand Handwave extraction. Disabled in untrusted workspaces."
+        },
+        "handwave.leanArtifactBuildTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 1000,
+          "description": "Timeout for an automatic targeted Lake artifact build."
         },
         "handwave.leanDependencyCheckTimeoutMs": {
           "type": "number",
@@ -153,9 +173,9 @@
         },
         "handwave.leanDependencyCheckBatchSize": {
           "type": "number",
-          "default": 16,
+          "default": 4096,
           "minimum": 1,
-          "description": "Maximum number of compatible declarations to check in one Handwave Lean dependency-check probe."
+          "description": "Maximum number of compatible declarations to extract in one Handwave Lean process."
         }
       }
     },

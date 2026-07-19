@@ -116,8 +116,8 @@ Useful target forms:
 
 ## Lean Status Badges
 
-For theorem-like declarations, Handwave combines local Lean diagnostics with
-optional dependency checks.
+For theorem-like declarations, Handwave combines direct source checks with
+optional Lean dependency probes.
 
 Badge meanings:
 
@@ -126,22 +126,40 @@ Badge meanings:
 - Yellow check: the declaration checks, but a transitive dependency still uses
   `sorryAx`.
 - Red cross: the declaration is locally unchecked, for example because it has a
-  direct `sorry` / `admit` or overlapping Lean errors.
+  direct `sorry` / `admit`. The experimental Lean-server backend also reports
+  overlapping Lean errors this way.
 - `...`: status is pending.
 - `?`: Handwave attempted a dependency check but could not determine the
   result.
-- `!`: the dependency check is blocked, for example by file-wide Lean errors or
-  by a file that cannot be probed as a Lean module under the workspace root.
+- `!`: the dependency check is blocked, for example because a file cannot be
+  probed as a Lean module under the workspace root.
 - Parenthesized badges: the displayed status is stale and predates the current
   Lean source or build state.
 
-When dependency checks are enabled, Handwave runs Lean probes with
-`#print axioms` for declarations demanded by open previews. By default it reads
-the resulting informational diagnostics from the running Lean language server,
-using a generated probe file under `.lake/handwave/`. The older
-`lake env lean --stdin` backend remains available only when explicitly selected.
-The check queue is priority-based and drains pending or stale items until there
-is nothing runnable left.
+When dependency checks are enabled, the default `subprocess` backend uses
+Lean's own build artifacts. Handwave reads resolved source references and
+declaration ranges from `.ilean`, asks Lake to build the required `.olean` and
+`.ilean` module facets on demand, and runs one toolchain-matched extractor with
+`lake env lean --stdin`. The extractor reads transitive axiom sets and filtered
+proof dependencies from `.olean`; its results are cached under
+`.lake/handwave/` using the module `.trace` contents as the validity key. A
+current cache therefore requires no Lean process when the extension restarts.
+The backend does not open hidden Lean documents or start the Lean language
+server. Dirty editor buffers and unsupported artifact layouts retain the
+source-prefix / `#print axioms` compatibility fallback.
+
+Automatic builds and extraction only run in trusted VS Code workspaces. Source
+browsing, article rendering, and direct `sorry` detection remain available in
+Restricted Mode.
+
+The explicit experimental `leanServer` backend instead writes a generated probe
+under `.lake/handwave/` and reads its informational diagnostics from the Lean
+language server. The check queue is priority-based and drains pending or stale
+items until there is nothing runnable left.
+
+When dependency checks are disabled, Handwave does not launch Lean in the
+background and only reports proof incompleteness that it can detect directly in
+source text.
 
 ## Installation
 
@@ -230,18 +248,25 @@ Settings are under the `handwave` namespace:
   `**/{node_modules,out,.git,.jj,.lake}/**`.
 - `handwave.enableDiagnostics`: enable diagnostics for malformed Handwave
   syntax and unresolved targets.
-- `handwave.enableLeanDependencyChecks`: enable `#print axioms` probes for
-  theorem dependency status. Checks run in preview priority order and batch
-  compatible declarations into optimized generated probes.
+- `handwave.enableLeanDependencyChecks`: enable artifact extraction and the
+  source-probe fallback for theorem dependency status. Checks run in preview
+  priority order and batch compatible declarations. When disabled,
+  Handwave performs source-only checks and does not launch Lean in the
+  background.
 - `handwave.leanDependencyCheckBackend`: choose `subprocess` or `leanServer` for
   dependency checks. The default is `subprocess`, which runs optimized
-  `lake env lean` probes. `leanServer` remains available as an explicit
-  experimental backend.
+  `lake env lean` probes without opening hidden Lean documents. `leanServer`
+  remains available as an explicit experimental backend.
 - `handwave.leanDependencyCheckDelayMs`: debounce before running dependency
   checks.
+- `handwave.autoBuildLeanArtifacts`: automatically run a targeted `lake build`
+  when a demanded module needs fresh `.olean` and `.ilean` artifacts. Enabled
+  by default and ignored in untrusted workspaces.
+- `handwave.leanArtifactBuildTimeoutMs`: timeout for an automatic Lake build.
 - `handwave.leanDependencyCheckTimeoutMs`: timeout for each Lean probe.
 - `handwave.leanDependencyCheckBatchSize`: maximum compatible declarations
-  checked in one Lean probe.
+  extracted in one Lean process. The default is 4096 so ordinary projects use
+  a single extractor invocation per workspace generation.
 
 ## Development
 

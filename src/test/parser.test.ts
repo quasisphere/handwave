@@ -3,6 +3,13 @@ import { test } from "node:test";
 import { HandwaveIndex } from "../handwave/index";
 import { buildTheoremExplorerPayload } from "../handwave/explorer";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
+import {
+  applyLeanIleanArtifacts,
+  leanArtifactExtractorInput,
+  parseLeanArtifactCache,
+  parseLeanArtifactExtractorOutput
+} from "../handwave/leanArtifacts";
+import { shouldUseLeanServerDiagnostics } from "../handwave/leanCheck";
 import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
 import {
@@ -34,6 +41,112 @@ statement:
 -/
 def double (n : Nat) : Nat := n + n
 `;
+
+test("only the explicit Lean-server backend uses Lean server diagnostics", () => {
+  assert.equal(shouldUseLeanServerDiagnostics(true, "subprocess"), false);
+  assert.equal(shouldUseLeanServerDiagnostics(false, "subprocess"), false);
+  assert.equal(shouldUseLeanServerDiagnostics(false, "leanServer"), false);
+  assert.equal(shouldUseLeanServerDiagnostics(true, "leanServer"), true);
+});
+
+test("uses ilean declaration identities and parent references for the theorem graph", () => {
+  const uri = "/workspace/Demo.lean";
+  const declarations = parseLeanDocument(`namespace Demo
+
+theorem sourceDep : True := by trivial
+
+private theorem privateDep : True := by trivial
+
+theorem root : True := by
+  exact sourceDep
+
+end Demo
+`, uri);
+  const sourceDep = declarations.find((declaration) => declaration.sourceName === "Demo.sourceDep")!;
+  const privateDep = declarations.find((declaration) => declaration.sourceName === "Demo.privateDep")!;
+  const root = declarations.find((declaration) => declaration.sourceName === "Demo.root")!;
+  const privateArtifactName = "_private.Demo.0.Demo.privateDep";
+  const positions = (declaration: typeof root) => [
+    declaration.range.start.line,
+    declaration.range.start.character,
+    declaration.range.end.line,
+    declaration.range.end.character,
+    declaration.nameRange.start.line,
+    declaration.nameRange.start.character,
+    declaration.nameRange.end.line,
+    declaration.nameRange.end.character
+  ];
+  const referenceKey = JSON.stringify({ c: { m: "Demo", n: privateArtifactName } });
+  const ilean = JSON.stringify({
+    version: 5,
+    module: "Demo",
+    directImports: [],
+    decls: {
+      "Demo.sourceDep": positions(sourceDep),
+      [privateArtifactName]: positions(privateDep),
+      "Demo.root": positions(root)
+    },
+    references: {
+      [referenceKey]: {
+        definition: positions(privateDep).slice(4),
+        usages: [[
+          root.nameRange.start.line,
+          root.nameRange.start.character,
+          root.nameRange.end.line,
+          root.nameRange.end.character,
+          "Demo.root"
+        ]]
+      }
+    }
+  });
+
+  const metadata = applyLeanIleanArtifacts(declarations, [{ uri, contents: ilean }]);
+  assert.equal(
+    metadata.declarations.find((declaration) => declaration.name === privateDep.name)?.artifactName,
+    privateArtifactName
+  );
+  assert.deepEqual(metadata.dependencyGraph.get(root.name), [privateDep.name]);
+
+  const index = new HandwaveIndex("/workspace", metadata.declarations, [], new Map(), metadata.dependencyGraph);
+  assert.deepEqual(index.dependenciesForLean(root.name), [privateDep.name]);
+});
+
+test("generates and parses structured Lean artifact extraction records", () => {
+  const input = leanArtifactExtractorInput(
+    ["Demo.Module"],
+    ["Demo.root", "_private.Demo.Module.0.Demo.privateDep"]
+  );
+  assert.ok(input);
+  assert.match(input, /^import Demo\.Module/m);
+  assert.match(input, /Lean\.collectAxioms/);
+  assert.match(input, /_private\.Demo\.Module\.0\.Demo\.privateDep/);
+
+  const output = [
+    "ordinary Lean output",
+    'HANDWAVE_ARTIFACT {"schemaVersion":1,"name":"Demo.root","axioms":["propext"],"typeConstants":[],"valueConstants":["Demo.dep"]}'
+  ].join("\n");
+  assert.deepEqual(parseLeanArtifactExtractorOutput(output).get("Demo.root"), {
+    name: "Demo.root",
+    axioms: ["propext"],
+    typeConstants: [],
+    valueConstants: ["Demo.dep"]
+  });
+
+  const cache = parseLeanArtifactCache(JSON.stringify({
+    schemaVersion: 1,
+    entries: {
+      "Demo.root": {
+        name: "Demo.root",
+        module: "Demo.Module",
+        traceFingerprint: "abc",
+        axioms: ["propext"],
+        typeConstants: [],
+        valueConstants: ["Demo.dep"]
+      }
+    }
+  }));
+  assert.equal(cache?.entries["Demo.root"].traceFingerprint, "abc");
+});
 
 const articleText = `# Associativity
 

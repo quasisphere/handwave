@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { collectDiagnostics, DiagnosticIssue } from "./handwave/diagnostics";
 import { buildTheoremExplorerPayload, HandwaveTheoremExplorerProvider } from "./handwave/explorer";
-import { HandwaveIndex } from "./handwave/index";
+import { HandwaveIndex, isIndexedLeanDeclaration } from "./handwave/index";
 import { parseLeanAxiomOutput } from "./handwave/leanAxiom";
 import {
   applyLeanIleanArtifacts,
@@ -442,6 +442,7 @@ class HandwaveController
       const text = await readWorkspaceText(uri);
       declarations.push(...parseLeanDocument(text, uri.fsPath));
     }
+    declarations = declarations.filter(isIndexedLeanDeclaration);
 
     const artifactMetadata = await loadLeanArtifactMetadata(declarations, workspaceFolders);
     declarations = artifactMetadata.declarations;
@@ -519,7 +520,8 @@ class HandwaveController
     }
 
     if (isLeanUri(document.uri)) {
-      const declarations = parseLeanDocument(document.getText(), document.uri.fsPath);
+      const declarations = parseLeanDocument(document.getText(), document.uri.fsPath)
+        .filter(isIndexedLeanDeclaration);
       for (const declaration of this.declarations) {
         if (declaration.uri === document.uri.fsPath) {
           this.leanArtifactDependencyGraph.delete(declaration.name);

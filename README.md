@@ -84,6 +84,11 @@ theorem label to open its source popup; a filled or empty star appears before
 the text/Lean view toggle buttons. Click the star to toggle the `milestone` tag
 in the source block.
 
+The special `shadow` tag excludes a theorem or lemma from Handwave's index.
+This is useful for challenge or comparison files that intentionally repeat a
+declaration name without replacing the project theorem in previews and status
+checks.
+
 ## Writing Handwave Articles
 
 Handwave article files use the extensions `.hw.md` or `.hw`. They support

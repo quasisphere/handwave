@@ -1,6 +1,6 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
-import { HandwaveIndex } from "../handwave/index";
+import { HandwaveIndex, isIndexedLeanDeclaration } from "../handwave/index";
 import { buildTheoremExplorerPayload } from "../handwave/explorer";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import {
@@ -355,6 +355,63 @@ theorem tagged_result : True := by
   assert.equal(hasHandwaveTag(declarations[0].doc, "milestone"), true);
   assert.equal(hasHandwaveTag(declarations[0].doc, "draft"), true);
   assert.equal(hasHandwaveTag(declarations[0].doc, "other"), false);
+});
+
+test("does not index shadow-tagged theorems or let them override ordinary declarations", () => {
+  const ordinarySource = `namespace Duplicate
+
+/--
+%%handwave
+statement:
+  The completed project theorem.
+-/
+theorem result : True := by
+  trivial
+
+end Duplicate
+`;
+  const shadowSource = `namespace Duplicate
+
+/--
+%%handwave
+tags:
+  shadow
+statement:
+  The challenge copy of the theorem.
+-/
+theorem result : True := by
+  sorry
+
+end Duplicate
+`;
+  const ordinary = parseLeanDocument(ordinarySource, "/workspace/Project.lean")[0];
+  const shadow = parseLeanDocument(shadowSource, "/workspace/Challenge.lean")[0];
+  assert.equal(ordinary.name, shadow.name);
+  assert.equal(isIndexedLeanDeclaration(ordinary), true);
+  assert.equal(isIndexedLeanDeclaration(shadow), false);
+
+  const declarations = [ordinary, shadow];
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  assert.equal(index.leanDeclarations.get(ordinary.name)?.uri, ordinary.uri);
+  assert.equal(index.resolve(`lean:${ordinary.name}`)?.preview, ordinary.leanStatement);
+  assert.doesNotMatch(index.leanDeclarations.get(ordinary.name)?.leanProof ?? "", /\bsorry\b/);
+
+  const explorer = buildTheoremExplorerPayload(index, declarations, ["/workspace"]);
+  assert.equal(explorer.theoremCount, 1);
+  assert.deepEqual(explorer.theorems.map((theorem) => theorem.uri), [ordinary.uri]);
+
+  const shadowOnlyIndex = new HandwaveIndex("/workspace", [shadow], []);
+  assert.equal(shadowOnlyIndex.resolve(`lean:${shadow.name}`), undefined);
+  assert.equal(shadowOnlyIndex.checkStatusForLean(shadow.name), undefined);
+  assert.deepEqual(shadowOnlyIndex.dependenciesForLean(shadow.name), []);
+  const shadowPreview = renderLeanDocumentHtml(
+    shadowSource,
+    shadow.uri,
+    shadowOnlyIndex,
+    (target) => `command:${target}`
+  );
+  assert.match(shadowPreview, /No Lean declarations were found in this file\./);
+  assert.doesNotMatch(shadowPreview, /<section class="theorem-view"/);
 });
 
 test("parses namespace-qualified Lean declaration names", () => {

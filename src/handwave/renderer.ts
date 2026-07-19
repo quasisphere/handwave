@@ -1,4 +1,4 @@
-import { HandwaveIndex } from "./index";
+import { HandwaveIndex, isIndexedLeanDeclaration } from "./index";
 import {
   hasHandwaveTag,
   isHandwaveNavigationTarget,
@@ -83,7 +83,9 @@ export function renderLeanDocumentHtml(
     );
   const declarations = indexedDeclarations.length > 0
     ? indexedDeclarations
-    : parseLeanDocument(text, uri).filter((declaration) => !declaration.isPrivate);
+    : parseLeanDocument(text, uri)
+      .filter(isIndexedLeanDeclaration)
+      .filter((declaration) => !declaration.isPrivate);
   const target = options.currentTarget ? parseTarget(options.currentTarget) : undefined;
   const targetDeclaration = target?.kind === "lean" ? index.leanDeclarations.get(target.base) : undefined;
   if (

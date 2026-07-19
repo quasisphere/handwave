@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { HandwaveIndex } from "./index";
+import { HandwaveIndex, isIndexedLeanDeclaration } from "./index";
 import { renderCheckStatus, renderLeanDeclarationPreviewHtml } from "./renderer";
 import { LeanDeclaration } from "./types";
 
@@ -103,6 +103,7 @@ export function buildTheoremExplorerPayload(
   workspaceRoots: readonly string[]
 ): TheoremExplorerPayload {
   const theorems = declarations
+    .filter(isIndexedLeanDeclaration)
     .filter(isTheoremLikeDeclaration)
     .map((declaration) => theoremExplorerItem(index, declaration, workspaceRoots))
     .sort(compareTheoremExplorerItems);

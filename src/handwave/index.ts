@@ -6,7 +6,7 @@ import {
   ParsedTarget,
   ResolvedTarget
 } from "./types";
-import { blankLeanCommentsAndStrings, isSupportedSelector, parseTarget } from "./parser";
+import { blankLeanCommentsAndStrings, hasHandwaveTag, isSupportedSelector, parseTarget } from "./parser";
 
 export class HandwaveIndex {
   readonly leanDeclarations = new Map<string, LeanDeclaration>();
@@ -25,14 +25,20 @@ export class HandwaveIndex {
     artifactDependencyGraph: ReadonlyMap<string, string[]> = new Map()
   ) {
     this.workspaceRoots = (Array.isArray(workspaceRoots) ? workspaceRoots : [workspaceRoots]).filter(Boolean);
+    const indexedDeclarations = declarations.filter(isIndexedLeanDeclaration);
     this.checkStatuses = checkStatuses;
 
-    for (const declaration of declarations) {
+    for (const declaration of indexedDeclarations) {
       this.leanDeclarations.set(declaration.name, declaration);
     }
-    const sourceDependencyGraph = collectLeanDependencyGraph(declarations);
+    const sourceDependencyGraph = collectLeanDependencyGraph(indexedDeclarations);
+    const indexedTheoremNames = new Set(
+      indexedDeclarations.filter(isTheoremLikeDeclaration).map((declaration) => declaration.name)
+    );
     for (const [name, dependencies] of artifactDependencyGraph) {
-      sourceDependencyGraph.set(name, [...dependencies]);
+      if (indexedTheoremNames.has(name)) {
+        sourceDependencyGraph.set(name, dependencies.filter((dependency) => indexedTheoremNames.has(dependency)));
+      }
     }
     this.leanDependencyGraph = sourceDependencyGraph;
 
@@ -81,10 +87,13 @@ export class HandwaveIndex {
   }
 
   checkStatusForLean(name: string): LeanDeclarationCheckStatus | undefined {
-    return this.checkStatuses.get(name);
+    return this.leanDeclarations.has(name) ? this.checkStatuses.get(name) : undefined;
   }
 
   dependenciesForLean(name: string): string[] {
+    if (!this.leanDeclarations.has(name)) {
+      return [];
+    }
     const dependencies = [...(this.leanDependencyGraph.get(name) ?? [])];
     const seen = new Set(dependencies);
     const status = this.checkStatuses.get(name);
@@ -200,6 +209,10 @@ export class HandwaveIndex {
     }
   }
 
+}
+
+export function isIndexedLeanDeclaration(declaration: LeanDeclaration): boolean {
+  return !isTheoremLikeDeclaration(declaration) || !hasHandwaveTag(declaration.doc, "shadow");
 }
 
 export function canonicalTargetKey(target: ParsedTarget): string {

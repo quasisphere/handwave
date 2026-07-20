@@ -860,6 +860,63 @@ theorem derived_theorem : True := by
   assert.doesNotThrow(() => new Function(scripts.at(-1)?.[1] ?? ""));
 });
 
+test("typesets only theorem explorer graph titles that contain math", () => {
+  const declarations = parseLeanDocument(`/--
+%%handwave
+name:
+  A space \\(X\\)
+statement:
+  The space $X$ has the required property.
+-/
+theorem legacy_graph_math : True := by
+  trivial
+
+/--
+%%handwave
+name:
+  A map $f$
+statement:
+  The map $f$ has the required property.
+-/
+theorem dollar_graph_math : True := by
+  trivial
+
+/--
+%%handwave
+name:
+  A plain graph title
+statement:
+  This title contains no formula.
+-/
+theorem plain_graph_title : True := by
+  trivial
+`, "/workspace/GraphMath.lean");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  const payload = buildTheoremExplorerPayload(index, declarations, ["/workspace"]);
+
+  assert.equal(
+    payload.theorems.find((theorem) => theorem.name === "legacy_graph_math")?.displayNameHasMath,
+    true
+  );
+  assert.equal(
+    payload.theorems.find((theorem) => theorem.name === "dollar_graph_math")?.displayNameHasMath,
+    true
+  );
+  assert.equal(
+    payload.theorems.find((theorem) => theorem.name === "plain_graph_title")?.displayNameHasMath,
+    false
+  );
+
+  const html = renderTheoremExplorerHtml(payload);
+  assert.match(html, /data-graph-math/);
+  assert.match(html, /graph\.querySelectorAll\("\[data-graph-math\]"\)/);
+  assert.match(html, /if \(graphMathTypesetScheduled\) \{\s*return;/);
+  assert.match(html, /mathTypesetPromise = mathTypesetPromise/);
+  assert.match(html, /mathJax\.typesetClear\(\[element\]\)/);
+  const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
+  assert.doesNotThrow(() => new Function(scripts.at(-1)?.[1] ?? ""));
+});
+
 test("renders theorem check status supplied by Lean diagnostics", () => {
   const declarations = parseLeanDocument(proofStatusLeanText, "/workspace/ProofStatus.lean");
   const articleText = [

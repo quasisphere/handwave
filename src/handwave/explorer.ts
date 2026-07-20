@@ -16,6 +16,7 @@ export interface TheoremExplorerItem {
   sourceName: string;
   shortName: string;
   displayName: string;
+  displayNameHasMath: boolean;
   moduleName: string;
   uri: string;
   relativePath: string;
@@ -172,6 +173,7 @@ function theoremExplorerItem(
     sourceName: declaration.sourceName,
     shortName: shortLeanName(declaration.sourceName),
     displayName,
+    displayNameHasMath: containsMathDelimiter(displayName),
     moduleName,
     uri: declaration.uri,
     relativePath: relativeWorkspacePath(declaration.uri, workspaceRoots),
@@ -251,6 +253,26 @@ function compareTheoremExplorerItems(first: TheoremExplorerItem, second: Theorem
   return first.moduleName.localeCompare(second.moduleName) ||
     first.shortName.localeCompare(second.shortName) ||
     first.sourceName.localeCompare(second.sourceName);
+}
+
+function containsMathDelimiter(text: string): boolean {
+  if (
+    (text.includes("\\(") && text.includes("\\)")) ||
+    (text.includes("\\[") && text.includes("\\]"))
+  ) {
+    return true;
+  }
+
+  let dollarCount = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "$" && (index === 0 || text[index - 1] !== "\\")) {
+      dollarCount += 1;
+      if (dollarCount >= 2) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function isTheoremLikeDeclaration(declaration: LeanDeclaration): boolean {
@@ -719,9 +741,14 @@ export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): stri
     let suggestionItems = [];
     let activeSuggestionIndex = -1;
     let graphLayoutVersion = 0;
+    let graphMathTypesetLayout = undefined;
+    let graphMathTypesetVersion = 0;
+    let graphMathTypesetScheduled = false;
     let currentGraphLayout = undefined;
     let visibleTheoremKey = "";
     let nextPreviewRequestId = 1;
+    let previewMathTypesetVersion = 0;
+    let mathTypesetPromise = Promise.resolve();
     const previewHtmlByName = new Map();
     const pendingPreviewRequestIds = new Map();
 
@@ -731,6 +758,68 @@ export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): stri
     const stats = document.getElementById("stats");
     const graph = document.getElementById("graph");
     const preview = document.getElementById("preview");
+
+    function clearTypesetMath(element) {
+      const mathJax = window.MathJax;
+      if (
+        !element.querySelector("mjx-container") ||
+        typeof mathJax?.typesetClear !== "function"
+      ) {
+        return;
+      }
+      mathJax.typesetClear([element]);
+    }
+
+    function replaceTypesetContent(element, htmlContent) {
+      clearTypesetMath(element);
+      element.innerHTML = htmlContent;
+    }
+
+    function queueMathTypeset(elementsProvider, isCurrent, onComplete) {
+      const mathJax = window.MathJax;
+      if (typeof mathJax?.typesetPromise !== "function") {
+        return;
+      }
+      mathTypesetPromise = mathTypesetPromise
+        .catch(() => undefined)
+        .then(() => {
+          if (!isCurrent()) {
+            return undefined;
+          }
+          const elements = elementsProvider();
+          if (elements.length === 0) {
+            return undefined;
+          }
+          return mathJax.typesetPromise(elements).then(() => {
+            if (isCurrent()) {
+              onComplete?.();
+            }
+          });
+        })
+        .catch(() => undefined);
+    }
+
+    function scheduleGraphMathTypeset(layout, version) {
+      graphMathTypesetLayout = layout;
+      graphMathTypesetVersion = version;
+      if (graphMathTypesetScheduled) {
+        return;
+      }
+      graphMathTypesetScheduled = true;
+      window.requestAnimationFrame(() => {
+        graphMathTypesetScheduled = false;
+        const scheduledLayout = graphMathTypesetLayout;
+        const scheduledVersion = graphMathTypesetVersion;
+        if (!scheduledLayout) {
+          return;
+        }
+        queueMathTypeset(
+          () => [...graph.querySelectorAll("[data-graph-math]")],
+          () => scheduledVersion === graphMathTypesetVersion && scheduledVersion === graphLayoutVersion,
+          () => window.requestAnimationFrame(() => applyMeasuredGraphLayout(scheduledLayout, scheduledVersion))
+        );
+      });
+    }
 
     function createTheoremMap(sourcePayload) {
       const result = new Map();
@@ -914,15 +1003,18 @@ export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): stri
         graphLayoutVersion++;
         currentGraphLayout = undefined;
         reportVisibleTheorems([]);
-        graph.innerHTML = '<div class="graph-empty">No theorems.</div>';
+        replaceTypesetContent(graph, '<div class="graph-empty">No theorems.</div>');
         renderPreview();
         return;
       }
       const layout = layoutGraph(roots, theoremMap);
       const version = ++graphLayoutVersion;
       reportVisibleTheorems(layout.nodes.map((node) => node.name));
-      graph.innerHTML = renderGraph(layout, theoremMap);
+      replaceTypesetContent(graph, renderGraph(layout, theoremMap));
       window.requestAnimationFrame(() => applyMeasuredGraphLayout(layout, version));
+      if (graph.querySelector("[data-graph-math]")) {
+        scheduleGraphMathTypeset(layout, version);
+      }
       renderPreview();
     }
 
@@ -1175,13 +1267,14 @@ export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): stri
       const dependency = highlight.nodes.has(theorem.name) ? " graph-node-dependency" : "";
       const star = theorem.milestone ? "★" : "☆";
       const starClass = theorem.milestone ? "star star-on" : "star";
+      const mathAttribute = theorem.displayNameHasMath ? ' data-graph-math="true"' : '';
       return '<button class="graph-node' + selected + dependency + '" type="button" data-select-theorem="' + html(theorem.name) +
         '" data-graph-node-index="' + String(index) +
         '" style="left: ' + String(node.x) + 'px; top: ' + String(node.y) +
         'px; width: ' + String(layout.nodeWidth) + 'px;">' +
         '<span class="graph-node-status">' + (theorem.statusHtml || '') + '</span>' +
         '<span class="' + starClass + '">' + star + '</span>' +
-        '<span class="theorem-node-text"><span class="theorem-title">' + html(theorem.displayName) + '</span>' +
+        '<span class="theorem-node-text"><span class="theorem-title"' + mathAttribute + '>' + html(theorem.displayName) + '</span>' +
         '<span class="theorem-module">' + html(theorem.moduleName || theorem.relativePath) + '</span></span>' +
         '</button>';
     }
@@ -1353,14 +1446,18 @@ export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): stri
     }
 
     function renderPreview() {
+      const mathVersion = ++previewMathTypesetVersion;
       const theorem = byName().get(selectedName);
       if (!theorem) {
-        preview.innerHTML = '<p class="preview-empty">Select a theorem.</p>';
+        replaceTypesetContent(preview, '<p class="preview-empty">Select a theorem.</p>');
         return;
       }
       const previewHtml = previewHtmlByName.get(theorem.name);
       if (previewHtml === undefined) {
-        preview.innerHTML = '<p class="preview-empty">Loading theorem preview…</p>' + renderViewerInfo(theorem);
+        replaceTypesetContent(
+          preview,
+          '<p class="preview-empty">Loading theorem preview…</p>' + renderViewerInfo(theorem)
+        );
         if (!pendingPreviewRequestIds.has(theorem.name)) {
           const requestId = nextPreviewRequestId++;
           pendingPreviewRequestIds.set(theorem.name, requestId);
@@ -1368,8 +1465,14 @@ export function renderTheoremExplorerHtml(payload: TheoremExplorerPayload): stri
         }
         return;
       }
-      preview.innerHTML = injectPreviewMilestoneControl(previewHtml, theorem) + renderViewerInfo(theorem);
-      window.MathJax?.typesetPromise?.([preview]).catch(() => undefined);
+      replaceTypesetContent(
+        preview,
+        injectPreviewMilestoneControl(previewHtml, theorem) + renderViewerInfo(theorem)
+      );
+      queueMathTypeset(
+        () => [preview],
+        () => mathVersion === previewMathTypesetVersion
+      );
     }
 
     function setPreview(name, requestId, previewHtml) {

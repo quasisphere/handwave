@@ -270,8 +270,8 @@ Settings are under the `handwave` namespace:
 - `handwave.leanArtifactBuildTimeoutMs`: timeout for an automatic Lake build.
 - `handwave.leanDependencyCheckTimeoutMs`: timeout for each Lean probe.
 - `handwave.leanDependencyCheckBatchSize`: maximum compatible declarations
-  extracted in one Lean process. The default is 4096 so ordinary projects use
-  a single extractor invocation per workspace generation.
+  extracted in one Lean process. The default is 1024 to keep generated Lean
+  probes within the elaborator's recursion limit.
 
 ## Development
 

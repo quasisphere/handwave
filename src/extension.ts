@@ -1202,7 +1202,7 @@ class HandwaveController
       return undefined;
     }
 
-    const batchSize = Math.max(1, Math.floor(config.get<number>("leanDependencyCheckBatchSize", 4096)));
+    const batchSize = Math.max(1, Math.floor(config.get<number>("leanDependencyCheckBatchSize", 1024)));
     const requests: LeanAxiomCheckRequest[] = [];
     let selectedRoot: string | undefined;
     const selectedUris = new Set<string>();

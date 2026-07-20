@@ -173,7 +173,7 @@
         },
         "handwave.leanDependencyCheckBatchSize": {
           "type": "number",
-          "default": 4096,
+          "default": 1024,
           "minimum": 1,
           "description": "Maximum number of compatible declarations to extract in one Handwave Lean process."
         }

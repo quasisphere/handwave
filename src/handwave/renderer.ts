@@ -1,4 +1,5 @@
 import { HandwaveIndex, isIndexedLeanDeclaration } from "./index";
+import { renderMathJaxConfigurationScript } from "./mathJax";
 import {
   hasHandwaveTag,
   isHandwaveNavigationTarget,
@@ -14,12 +15,16 @@ interface RenderOptions {
   currentTarget?: string;
   currentUri?: string;
   editorHref?: (target: string) => string;
+  sourceLinks?: boolean;
+  editableTags?: boolean;
 }
 
 interface DeclarationRenderOptions {
   popovers?: boolean;
   milestoneControls?: boolean;
   dependencyTree?: boolean;
+  sourceLinks?: boolean;
+  editableTags?: boolean;
 }
 
 type LeanCheckStatus = ReturnType<HandwaveIndex["checkStatusForLean"]>;
@@ -38,13 +43,30 @@ export function renderArticleHtml(
   commandHref: (target: string) => string,
   options: RenderOptions = {}
 ): string {
+  const body = renderArticleFragmentHtml(text, uri, index, commandHref, options);
+  const article = parseArticleDocument(text, uri);
+  const title = article.anchors[0]?.title ?? "Handwave Article";
+
+  return renderHtmlShell(title, body, options);
+}
+
+export function renderArticleFragmentHtml(
+  text: string,
+  uri: string,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string,
+  options: RenderOptions = {}
+): string {
   const editorHref = options.editorHref ?? commandHref;
   const withIncludes = text.replace(/@include\{([^}\s]+)\}/g, (_match, target: string) => {
     const parsedTarget = parseTarget(target);
     if (parsedTarget.kind === "lean" && !parsedTarget.selector) {
       const declaration = index.leanDeclarations.get(parsedTarget.base);
       if (declaration) {
-        return renderDeclarationPackage(declaration, target, commandHref, editorHref, index);
+        return renderDeclarationPackage(declaration, target, commandHref, editorHref, index, {
+          sourceLinks: options.sourceLinks,
+          editableTags: options.editableTags
+        });
       }
     }
 
@@ -60,11 +82,7 @@ export function renderArticleHtml(
     return `<div class="include" data-target="${escapeHtml(target)}">${preview}</div>`;
   });
 
-  const body = renderBlocks(withIncludes, commandHref);
-  const article = parseArticleDocument(text, uri);
-  const title = article.anchors[0]?.title ?? "Handwave Article";
-
-  return renderHtmlShell(title, body, options);
+  return renderBlocks(withIncludes, commandHref);
 }
 
 export function renderLeanDocumentHtml(
@@ -118,7 +136,8 @@ export function renderLeanDeclarationPreviewHtml(
   declaration: LeanDeclaration,
   index: HandwaveIndex,
   commandHref: (target: string) => string,
-  editorHref: (target: string) => string
+  editorHref: (target: string) => string,
+  options: Pick<DeclarationRenderOptions, "sourceLinks"> = {}
 ): string {
   return renderDeclarationPackage(
     declaration,
@@ -129,7 +148,7 @@ export function renderLeanDeclarationPreviewHtml(
     {
       dependencyTree: false,
       milestoneControls: false,
-      popovers: false
+      sourceLinks: options.sourceLinks
     }
   );
 }
@@ -247,11 +266,9 @@ function renderHtmlShell(
     .check-status-dependency-warning {
       color: var(--warning);
     }
-    .check-status-inconclusive {
-      color: var(--muted);
-    }
+    .check-status-inconclusive,
     .check-status-blocked {
-      color: var(--warning);
+      color: var(--muted);
     }
     .check-status-pending {
       animation: check-status-pulse 1.2s ease-in-out infinite;
@@ -298,6 +315,14 @@ function renderHtmlShell(
     .milestone-control-inactive {
       color: var(--muted);
     }
+    .milestone-tag {
+      color: var(--vscode-editorWarning-foreground, #9a6700);
+      display: inline-flex;
+      font-weight: 700;
+      justify-content: center;
+      margin-right: 4px;
+      width: 1.2em;
+    }
     .source-popover {
       background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
       border: 1px solid var(--vscode-editorHoverWidget-border, var(--border));
@@ -322,7 +347,8 @@ function renderHtmlShell(
       right: 0;
       top: -8px;
     }
-    .source-popover a {
+    .source-popover a,
+    .source-popover .source-name {
       display: inline-block;
       font-family: var(--vscode-editor-font-family);
       font-size: 0.9em;
@@ -583,16 +609,7 @@ function renderHtmlShell(
     }
   </style>
   <script>
-    window.MathJax = {
-      tex: {
-        inlineMath: [["$", "$"], ["\\\\(", "\\\\)"]],
-        displayMath: [["$$", "$$"], ["\\\\[", "\\\\]"]],
-        processEscapes: true
-      },
-      options: {
-        skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
-      }
-    };
+    ${renderMathJaxConfigurationScript()}
   </script>
   <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 </head>
@@ -895,15 +912,44 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
 }
 
 function renderInlineMarkdown(text: string, commandHref: (target: string) => string): string {
-  const escaped = escapeHtml(text);
-  return escaped.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label: string, target: string) => {
+  const links = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+  const fragments: string[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(links)) {
+    fragments.push(renderTypographicText(text.slice(cursor, match.index)));
+    const label = renderTypographicText(match[1]);
+    const target = match[2];
     const handwaveNavigation = isHandwaveNavigationTarget(target);
     const navigationAttribute = handwaveNavigation
       ? ` data-handwave-target="${escapeHtml(target)}"`
       : "";
     const href = handwaveNavigation ? commandHref(target) : target;
-    return `<a href="${escapeHtml(href)}"${navigationAttribute} title="${escapeHtml(target)}">${label}</a>`;
-  });
+    fragments.push(`<a href="${escapeHtml(href)}"${navigationAttribute} title="${escapeHtml(target)}">${label}</a>`);
+    cursor = match.index + match[0].length;
+  }
+  fragments.push(renderTypographicText(text.slice(cursor)));
+  return fragments.join("");
+}
+
+function renderTypographicText(text: string): string {
+  return escapeHtml(applyLatexTextTypography(text));
+}
+
+export function applyLatexTextTypography(text: string): string {
+  const protectedInline = /(`+)([\s\S]*?)\1|\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\n])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?:https?:\/\/|mailto:|www\.)[^\s<]+/g;
+  const fragments: string[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(protectedInline)) {
+    fragments.push(replaceLatexTextDashes(text.slice(cursor, match.index)));
+    fragments.push(match[0]);
+    cursor = match.index + match[0].length;
+  }
+  fragments.push(replaceLatexTextDashes(text.slice(cursor)));
+  return fragments.join("");
+}
+
+function replaceLatexTextDashes(text: string): string {
+  return text.replace(/---|--/g, (dashes) => dashes.length === 3 ? "—" : "–");
 }
 
 function proseParagraphs(text: string): string[] {
@@ -989,7 +1035,7 @@ function renderTheoremView(
     : renderDependencyTree(declaration.name, index, commandHref);
   const milestoneControl = options.milestoneControls === false
     ? ""
-    : renderMilestoneTagControl(declaration, target);
+    : renderMilestoneTagControl(declaration, target, options.editableTags !== false);
 
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
@@ -1098,11 +1144,20 @@ function declarationLabel(baseLabel: string, declaration: LeanDeclaration): stri
     return `${escapeHtml(baseLabel)}.`;
   }
 
-  return `${escapeHtml(baseLabel)} (${escapeHtml(displayName)}).`;
+  return `${escapeHtml(baseLabel)} (${renderTypographicText(displayName)}).`;
 }
 
-function renderMilestoneTagControl(declaration: LeanDeclaration, target: string): string {
+function renderMilestoneTagControl(
+  declaration: LeanDeclaration,
+  target: string,
+  editable: boolean
+): string {
   const active = hasHandwaveTag(declaration.doc, "milestone");
+  if (!editable) {
+    return active
+      ? `<span class="milestone-tag" title="Milestone" aria-label="Milestone">★</span>`
+      : "";
+  }
   const escapedTarget = escapeHtml(target);
   const label = active ? "Remove milestone tag" : "Add milestone tag";
   const symbol = active ? "★" : "☆";
@@ -1128,7 +1183,10 @@ function renderDeclarationLabel(
   if (options.popovers === false) {
     return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong></span>`;
   }
-  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${leadingControlsHtml}${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span><a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a><button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
+  const sourceHtml = options.sourceLinks === false
+    ? `<span class="source-name" title="Lean declaration ${sourceLabel}">${sourceLabel}</span>`
+    : `<a href="${editorLinkHref}" title="Open ${sourceLabel} in editor">${sourceLabel}</a>`;
+  return `<span class="declaration-label"><strong><a class="declaration-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></strong><span class="source-popover"><span class="source-popover-row">${leadingControlsHtml}${renderModeControls(controlsLabel)}<span class="source-popover-separator">|</span>${sourceHtml}<button class="copy-control" type="button" data-copy-target="${escapedTarget}" title="Copy ${escapedTarget}" aria-label="Copy ${escapedTarget}"><span class="copy-icon" aria-hidden="true"></span><span class="sr-only">Copy</span></button></span>${popoverBodyHtml}</span></span>`;
 }
 
 function renderProofLabel(options: DeclarationRenderOptions = {}): string {
@@ -1189,7 +1247,7 @@ function renderDependencyNode(
   const href = escapeHtml(commandHref(target));
   const escapedTarget = escapeHtml(target);
   const escapedName = escapeHtml(node.name);
-  const escapedLabel = escapeHtml(dependencyDisplayName(node.name, index));
+  const escapedLabel = renderTypographicText(dependencyDisplayName(node.name, index));
   const statusKind = dependencyStatusKind(node.status);
   const children = node.children.length > 0 ? renderDependencyList(node.children, commandHref, index) : "";
   const cycleAttribute = node.cycle ? ` data-dependency-cycle="true"` : "";

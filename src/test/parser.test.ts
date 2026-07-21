@@ -1,7 +1,10 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
 import { HandwaveIndex, isIndexedLeanDeclaration } from "../handwave/index";
-import { buildTheoremExplorerPayload, renderTheoremExplorerHtml } from "../handwave/explorer";
+import {
+  buildTheoremExplorerPayload,
+  theoremExplorerStatusCategory
+} from "../handwave/explorer";
 import { parseLeanAxiomOutput } from "../handwave/leanAxiom";
 import {
   applyLeanIleanArtifacts,
@@ -10,15 +13,18 @@ import {
   parseLeanArtifactExtractorOutput
 } from "../handwave/leanArtifacts";
 import { shouldUseLeanServerDiagnostics } from "../handwave/leanCheck";
+import { handwaveMathJaxConfiguration } from "../handwave/mathJax";
 import { hasHandwaveTag, parseArticleDocument, parseLeanDocument, parseTarget, slugify } from "../handwave/parser";
 import { collectDiagnostics } from "../handwave/diagnostics";
 import {
   leanDeclarationAnchorId,
   renderArticleHtml,
+  renderArticleFragmentHtml,
   renderLeanDeclarationPreviewHtml,
   renderLeanDocumentHtml
 } from "../handwave/renderer";
 import { applySourceTextEdit, leanDeclarationTagToggleEdit } from "../handwave/tagEditor";
+import { renderTheoremExplorerHtml } from "../web/explorer";
 
 const leanText = `/--
 %%handwave
@@ -48,6 +54,39 @@ test("only the explicit Lean-server backend uses Lean server diagnostics", () =>
   assert.equal(shouldUseLeanServerDiagnostics(false, "subprocess"), false);
   assert.equal(shouldUseLeanServerDiagnostics(false, "leanServer"), false);
   assert.equal(shouldUseLeanServerDiagnostics(true, "leanServer"), true);
+});
+
+test("classifies theorem explorer statuses by badge color", () => {
+  assert.equal(theoremExplorerStatusCategory(leanStatus(true, "checked")), "green");
+  assert.equal(
+    theoremExplorerStatusCategory({ ...leanStatus(true, "cached checked"), stale: true }),
+    "green"
+  );
+  assert.equal(
+    theoremExplorerStatusCategory(leanStatus(false, "dependency warning", [], ["dependency"])),
+    "yellow"
+  );
+  assert.equal(
+    theoremExplorerStatusCategory({
+      ...leanStatus(false, "cached dependency warning", [], ["dependency"]),
+      stale: true
+    }),
+    "yellow"
+  );
+  assert.equal(
+    theoremExplorerStatusCategory({ ...leanStatus(false, "blocked"), blocked: true }),
+    "unknown"
+  );
+  assert.equal(theoremExplorerStatusCategory(leanStatus(false, "unchecked")), "red");
+  assert.equal(
+    theoremExplorerStatusCategory({ ...leanStatus(false, "cached unchecked"), stale: true }),
+    "red"
+  );
+  assert.equal(
+    theoremExplorerStatusCategory({ ...leanStatus(false, "unavailable"), inconclusive: true }),
+    "unknown"
+  );
+  assert.equal(theoremExplorerStatusCategory(undefined), "unknown");
 });
 
 test("uses ilean declaration identities and parent references for the theorem graph", () => {
@@ -479,6 +518,32 @@ end RelWP
   assert.equal(declarations[0].name, "RelWP.HyperbolicMetric.sample_theorem");
 });
 
+test("stops a final declaration before namespace end commands", () => {
+  const declarations = parseLeanDocument(`namespace Outer
+
+namespace Inner
+
+/--
+%%handwave
+statement:
+  The final theorem in a nested namespace is true.
+proof:
+  This is immediate.
+-/
+theorem final_theorem : True := by
+  trivial
+
+end Inner
+
+end Outer
+`, "/workspace/FinalDeclaration.lean");
+
+  assert.equal(declarations[0].name, "Outer.Inner.final_theorem");
+  assert.equal(declarations[0].leanProof, "by\n  trivial");
+  assert.doesNotMatch(declarations[0].statement, /end Inner|end Outer/);
+  assert.deepEqual(declarations[0].range.end, { line: 14, character: 0 });
+});
+
 test("indexes and renders includes for Unicode Lean declaration names", () => {
   const unicodeName =
     "JJMath.Cohomology.openSingularCochainTop_homologyπ_zero_eq_zero_of_sheafified_boundary_subdivision";
@@ -735,11 +800,28 @@ test("renders Lean statement includes as theorem views", () => {
     (target) => `command:${target}`,
     { editorHref: (target) => `editor:${target}` }
   );
+  const fragment = renderArticleFragmentHtml(
+    articleText,
+    "/workspace/natural-numbers.hw.md",
+    index,
+    (target) => `command:${target}`,
+    { editorHref: (target) => `editor:${target}` }
+  );
+  const staticFragment = renderArticleFragmentHtml(
+    articleText,
+    "/workspace/natural-numbers.hw.md",
+    index,
+    () => "#",
+    { sourceLinks: false }
+  );
 
+  assert.equal(html.includes(fragment), true);
   assert.match(html, /<a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="lean:my_add_assoc">parentheses do not matter<\/a>/);
   assert.match(html, /<strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
   assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
   assert.match(html, /class="source-popover"><span class="source-popover-row"><button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:my_add_assoc" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button><span class="view-switch" role="group" aria-label="Theorem view".*<span class="source-popover-separator">\|<\/span><a href="editor:lean:my_add_assoc" title="Open my_add_assoc in editor">my_add_assoc<\/a><button class="copy-control" type="button" data-copy-target="lean:my_add_assoc" title="Copy lean:my_add_assoc" aria-label="Copy lean:my_add_assoc"><span class="copy-icon" aria-hidden="true"><\/span><span class="sr-only">Copy<\/span><\/button>/);
+  assert.match(staticFragment, /<span class="source-name" title="Lean declaration my_add_assoc">my_add_assoc<\/span>/);
+  assert.doesNotMatch(staticFragment, /title="Open my_add_assoc in editor"/);
   assert.match(html, /<div class="proof-line"><button class="collapse-control" type="button" data-toggle-collapsed="proof" aria-expanded="true" aria-label="Collapse proof">▾<\/button><span class="declaration-label"><strong>Proof\.<\/strong>.*<div class="proof-content">/);
   assert.match(html, /\.proof-content \{\s*display: inline;/);
   assert.match(html, /\[data-mode="text"\] \.proof-body > \.prose-content \{\s*display: inline;/);
@@ -782,15 +864,29 @@ theorem untagged_theorem : True := by
   const declarations = parseLeanDocument(source, "/workspace/Tagged.lean");
   const index = new HandwaveIndex("/workspace", declarations, []);
   const html = renderLeanDocumentHtml(source, "/workspace/Tagged.lean", index, (target) => `command:${target}`);
+  const readOnlyFragment = renderArticleFragmentHtml(
+    [
+      "@include{lean:tagged_theorem}",
+      "",
+      "@include{lean:untagged_theorem}"
+    ].join("\n"),
+    "/workspace/milestones.hw.md",
+    index,
+    () => "#",
+    { editableTags: false }
+  );
 
   assert.match(html, /Theorem \(Tagged theorem\)\./);
   assert.match(html, /<button class="milestone-control milestone-control-active" type="button" data-toggle-tag="milestone" data-handwave-target="lean:tagged_theorem" aria-pressed="true" title="Remove milestone tag" aria-label="Remove milestone tag">★<\/button><span class="view-switch" role="group" aria-label="Theorem view">/);
   assert.match(html, inactiveMilestoneStarPattern);
   assert.match(html, /<button class="milestone-control milestone-control-inactive" type="button" data-toggle-tag="milestone" data-handwave-target="lean:untagged_theorem" aria-pressed="false" title="Add milestone tag" aria-label="Add milestone tag">☆<\/button><span class="view-switch" role="group" aria-label="Theorem view">/);
   assert.match(html, /postMessage\(\{ type: "toggleTag", target: handwaveTarget, tag \}\)/);
+  assert.match(readOnlyFragment, /<span class="milestone-tag" title="Milestone" aria-label="Milestone">★<\/span>/);
+  assert.doesNotMatch(readOnlyFragment, /data-toggle-tag="milestone"/);
+  assert.doesNotMatch(readOnlyFragment, />☆<\/button>/);
 });
 
-test("renders theorem previews without hover popovers for explorer panes", () => {
+test("renders theorem and proof hover controls for explorer previews", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
   const index = new HandwaveIndex("/workspace", declarations, []);
   const html = renderLeanDeclarationPreviewHtml(
@@ -803,7 +899,11 @@ test("renders theorem previews without hover popovers for explorer panes", () =>
   assert.match(html, /<section class="theorem-view"/);
   assert.match(html, /data-handwave-target="lean:my_add_assoc"/);
   assert.match(html, /Addition of natural numbers is associative/);
-  assert.doesNotMatch(html, /source-popover/);
+  assert.match(html, /class="source-popover"/);
+  assert.match(html, /aria-label="Theorem view"/);
+  assert.match(html, /aria-label="Proof view"/);
+  assert.equal((html.match(/data-set-mode="lean"/g) ?? []).length, 2);
+  assert.match(html, /<a href="editor:lean:my_add_assoc" title="Open my_add_assoc in editor">my_add_assoc<\/a>/);
   assert.doesNotMatch(html, /milestone-control/);
 });
 
@@ -849,13 +949,45 @@ theorem derived_theorem : True := by
   assert.deepEqual(base?.references.map((link) => link.target), ["article:notes/explorer.hw.md"]);
   assert.equal(base?.references[0]?.label, "notes/explorer.hw.md");
   assert.match(base?.statusHtml ?? "", /class="check-status check-status-checked"[^>]*>✓<\/span>/);
+  assert.equal(base?.statusCategory, "green");
   assert.equal(Object.hasOwn(base ?? {}, "previewHtml"), false);
 
   const html = renderTheoremExplorerHtml(payload);
+  assert.match(html, /const previewHtmlByName = new Map\(\);/);
+  assert.match(html, /const articleHtmlByTarget = new Map\(\);/);
+  assert.match(html, /const articleSearchItems = \[\];/);
+  assert.match(html, /const applicationShellEnabled = false;/);
+  assert.doesNotMatch(html, /id="navigation-toggle"/);
+  assert.doesNotMatch(html, /id="overview"/);
+  assert.doesNotMatch(html, /id="search-rendered"/);
+  assert.doesNotMatch(html, /id="theme-toggle"/);
+  assert.match(
+    html,
+    /injectPreviewMilestoneControl\(previewHtml, theorem\) \+ renderViewerInfo\(theorem\)/
+  );
+  assert.equal(html, renderTheoremExplorerHtml(payload, {}));
+  assert.match(
+    html,
+    /!link\.closest\("\.viewer-info"\) \|\| !openTargetLocally\(targetName\)/
+  );
   assert.match(html, /type: "requestPreview"/);
   assert.match(html, /message\.type === "setPreview"/);
   assert.match(html, /message\.type === "setStatuses"/);
+  assert.equal((html.match(/data-status-filter="/g) ?? []).length, 4);
+  assert.match(html, /data-status-filter="green"[^>]*>✓<\/button>/);
+  assert.match(html, /data-status-filter="yellow"[^>]*>✓<\/button>/);
+  assert.match(html, /data-status-filter="red"[^>]*>✗<\/button>/);
+  assert.match(html, /data-status-filter="unknown"[^>]*>\?<\/button>/);
+  assert.match(html, /let enabledStatusFilters = new Set\(statusFilterCategories\);/);
+  assert.match(html, /enabledStatusFilters\.has\(theoremStatusCategory\(theorem\)\)/);
+  assert.match(html, /theorem\.statusCategory = nextCategory;/);
   assert.match(html, /graph-node-status/);
+  assert.match(html, /\.preview \.theorem-line > \.check-status \{\s*left: -1\.55em;/);
+  assert.match(html, /padding: 10px 12px 16px 30px;/);
+  assert.match(
+    html,
+    /\.preview \.theorem-view \+ \.theorem-view,[\s\S]*margin-top: 1\.25em;/
+  );
   const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
   assert.doesNotThrow(() => new Function(scripts.at(-1)?.[1] ?? ""));
 });
@@ -1221,13 +1353,55 @@ def foldedProse : Nat := 0
 
 test("enables MathJax for LaTeX formulas in rendered articles", () => {
   const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
-  const article = parseArticleDocument("Inline math $x^2 + y^2 = z^2$.", "/workspace/math.hw.md");
+  const article = parseArticleDocument("Inline math $x^2 + y^2 = z^2$ and $\\fint_A^B f(x)\\,dx$.", "/workspace/math.hw.md");
   const index = new HandwaveIndex("/workspace", declarations, [article]);
-  const html = renderArticleHtml("Inline math $x^2 + y^2 = z^2$.", "/workspace/math.hw.md", index, (target) => `command:${target}`);
+  const html = renderArticleHtml("Inline math $x^2 + y^2 = z^2$ and $\\fint_A^B f(x)\\,dx$.", "/workspace/math.hw.md", index, (target) => `command:${target}`);
 
   assert.match(html, /window\.MathJax/);
   assert.match(html, /tex-chtml\.js/);
   assert.match(html, /\$x\^2 \+ y\^2 = z\^2\$/);
+  assert.match(html, /\$\\fint_A\^B f\(x\)\\,dx\$/);
+  assert.equal(handwaveMathJaxConfiguration.tex.macros.fint, "\\rlap{\\mkern2mu-}\\!\\int");
+  assert.ok(html.includes(JSON.stringify(handwaveMathJaxConfiguration.tex.macros.fint)));
+});
+
+test("renders LaTeX-style text dashes without changing code, math, or link targets", () => {
+  const declarations = parseLeanDocument(`/--
+%%handwave
+name:
+  Range -- theorem
+statement:
+  The range is 1--5.
+proof:
+  This follows --- directly.
+-/
+theorem dashRange : True := by
+  -- keep--lean
+  trivial
+`, "/workspace/Dashes.lean");
+  const articleText = [
+    "# Dashes -- in prose",
+    "",
+    "Pages 1--5 --- a range; [linked -- label](https://example.com/a--b).",
+    "",
+    "Keep `$x--y$`, `code--flag`, and https://example.com/a--b unchanged.",
+    "",
+    "@include{lean:dashRange}"
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/dashes.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml(articleText, "/workspace/dashes.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /<h1 id="dashes-in-prose">Dashes – in prose<\/h1>/);
+  assert.match(html, /Pages 1–5 — a range/);
+  assert.match(html, /href="https:\/\/example\.com\/a--b"[^>]*>linked – label<\/a>/);
+  assert.match(html, /\$x--y\$/);
+  assert.match(html, /`code--flag`/);
+  assert.match(html, /https:\/\/example\.com\/a--b unchanged/);
+  assert.match(html, /Theorem \(Range – theorem\)\./);
+  assert.match(html, /The range is 1–5\./);
+  assert.match(html, /This follows — directly\./);
+  assert.match(html, /<span class="lean-comment">-- keep--lean<\/span>/);
 });
 
 test("renders unnamed theorem and definition labels plainly", () => {

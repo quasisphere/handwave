@@ -4,7 +4,11 @@ import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import { collectDiagnostics, DiagnosticIssue } from "./handwave/diagnostics";
-import { buildTheoremExplorerPayload, HandwaveTheoremExplorerProvider } from "./handwave/explorer";
+import {
+  buildTheoremExplorerPayload,
+  theoremExplorerStatusCategory,
+  TheoremExplorerStatusCategory
+} from "./handwave/explorer";
 import { HandwaveIndex, isIndexedLeanDeclaration } from "./handwave/index";
 import { parseLeanAxiomOutput } from "./handwave/leanAxiom";
 import {
@@ -19,7 +23,6 @@ import {
 import { LeanDependencyCheckBackend, shouldUseLeanServerDiagnostics } from "./handwave/leanCheck";
 import { containsPosition } from "./handwave/position";
 import {
-  blankLeanCommentsAndStrings,
   isHandwaveNavigationTarget,
   normalizeHandwaveTag,
   parseArticleDocument,
@@ -34,6 +37,7 @@ import {
   renderLeanDocumentHtml
 } from "./handwave/renderer";
 import { applySourceTextEdit, leanDeclarationTagToggleEdit } from "./handwave/tagEditor";
+import { collectLeanSourceCheckStatuses } from "./handwave/status";
 import {
   ArticleDocument,
   ArticleInclude,
@@ -44,6 +48,7 @@ import {
   PositionLike,
   RangeLike
 } from "./handwave/types";
+import { HandwaveTheoremExplorerProvider } from "./vscode/explorerProvider";
 
 interface HandwavePreviewState {
   key: string;
@@ -890,15 +895,21 @@ class HandwaveController
 
   private refreshTheoremExplorerStatuses(): void {
     const nextStatuses = new Map<string, string>();
-    const updates: Array<{ name: string; statusHtml: string }> = [];
+    const updates: Array<{
+      name: string;
+      statusCategory: TheoremExplorerStatusCategory;
+      statusHtml: string;
+    }> = [];
     for (const declaration of this.declarations) {
       if (!isIndexedLeanDeclaration(declaration) || !isTheoremLikeDeclaration(declaration)) {
         continue;
       }
-      const statusHtml = renderCheckStatus(this.index.checkStatusForLean(declaration.name));
+      const status = this.index.checkStatusForLean(declaration.name);
+      const statusCategory = theoremExplorerStatusCategory(status);
+      const statusHtml = renderCheckStatus(status);
       nextStatuses.set(declaration.name, statusHtml);
       if (this.theoremExplorerStatusHtml.get(declaration.name) !== statusHtml) {
-        updates.push({ name: declaration.name, statusHtml });
+        updates.push({ name: declaration.name, statusCategory, statusHtml });
       }
     }
     this.theoremExplorerStatusHtml = nextStatuses;
@@ -2467,24 +2478,6 @@ function collectLeanDiagnosticCheckStatuses(
   return statuses;
 }
 
-function collectLeanSourceCheckStatuses(
-  declarations: readonly LeanDeclaration[]
-): Map<string, LeanDeclarationCheckStatus> {
-  // These statuses must remain derivable without opening a document or asking
-  // the Lean language server for diagnostics.
-  const statuses = new Map<string, LeanDeclarationCheckStatus>();
-  for (const declaration of declarations) {
-    if (!isTheoremLikeDeclaration(declaration)) {
-      continue;
-    }
-    const directIncompleteStatus = directIncompleteProofStatus(declaration);
-    if (directIncompleteStatus) {
-      statuses.set(declaration.name, directIncompleteStatus);
-    }
-  }
-  return statuses;
-}
-
 function comparePrioritizedLeanDeclarations(
   first: PrioritizedLeanDeclaration,
   second: PrioritizedLeanDeclaration
@@ -2528,24 +2521,6 @@ function compareLeanAxiomCheckRequests(
 ): number {
   return first.priority - second.priority ||
     first.declaration.name.localeCompare(second.declaration.name);
-}
-
-function directIncompleteProofStatus(declaration: LeanDeclaration): LeanDeclarationCheckStatus | undefined {
-  const proof = declaration.leanProof ?? "";
-  const searchableProof = blankLeanCommentsAndStrings(proof);
-  const match = /\b(?:sorry|admit)\b/i.exec(searchableProof);
-  if (!match) {
-    return undefined;
-  }
-
-  const token = match[0].toLowerCase();
-  return {
-    checked: false,
-    ownChecked: false,
-    dependencies: [],
-    failedDependencies: [],
-    reason: `Lean declaration contains a direct \`${token}\`.`
-  };
 }
 
 function axiomsForDeclaration(

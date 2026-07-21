@@ -195,6 +195,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "export-site": "npm run compile && node out/static/cli.js",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test out/test/*.test.js"
   },

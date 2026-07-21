@@ -343,7 +343,13 @@ function findDeclarationStatementEnd(text: string, searchableText: string, start
   const nextDoc = text.indexOf("\n/--", start + 1);
   declarationPattern.lastIndex = start + 1;
   const nextDeclaration = declarationPattern.exec(searchableText)?.index ?? -1;
-  const candidates = [nextDoc, nextDeclaration].filter((index) => index > start);
+  const scopeEndPattern = new RegExp(
+    `^[ \\t]*end(?:[ \\t]+${leanQualifiedIdentifierSource})?[ \\t]*(?=\\r?$)`,
+    "gmu"
+  );
+  scopeEndPattern.lastIndex = start + 1;
+  const nextScopeEnd = scopeEndPattern.exec(searchableText)?.index ?? -1;
+  const candidates = [nextDoc, nextDeclaration, nextScopeEnd].filter((index) => index > start);
   if (candidates.length === 0) {
     return text.length;
   }

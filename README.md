@@ -107,6 +107,13 @@ Including a theorem or lemma renders the full theorem view, including its proof
 section when proof prose is available. Use proof selectors only when you want
 to include just the proof sketch or source.
 
+Rendered prose follows LaTeX's text-dash convention: `--` becomes an en dash
+and `---` becomes an em dash. Math, inline and fenced code, Lean source, URLs,
+and link destinations retain their literal hyphens.
+
+Handwave's MathJax configuration also defines `\fint` as a stroked version of
+MathJax's native integral glyph, including support for ordinary integral limits.
+
 Useful target forms:
 
 - `lean:My.result`: link to or include a Lean declaration.
@@ -225,8 +232,9 @@ Editor UI:
   navigate within the preview.
 - Use the source links in declaration popovers to jump back to the Lean source.
 - Use the Handwave Activity Bar icon to open the theorem explorer. It defaults
-  to milestone-tagged theorems, supports module or theorem search, and shows a
-  selected theorem preview below the dependency graph.
+  to milestone-tagged theorems, supports module or theorem search, filters by
+  green, yellow, red, or unknown theorem status, and shows a selected theorem
+  preview below the dependency graph.
 
 Lean editor features:
 
@@ -283,3 +291,58 @@ npm test
 
 The tests compile the TypeScript sources and run the parser/renderer test suite
 with Node's built-in test runner.
+
+### Source boundaries
+
+Handwave keeps its shared indexing and rendering code separate from host
+integration:
+
+- `src/handwave/` contains the host-neutral project model, parsers, index,
+  artifact readers, preview renderer, and theorem-explorer payload builder.
+- `src/web/` contains the browser application rendered into a webview. It does
+  not load the VS Code API at runtime.
+- `src/vscode/` contains the adapters that connect browser messages and shared
+  Handwave data to VS Code.
+- `src/extension.ts` is the VS Code composition root.
+
+This boundary allows another read-only host, such as a static-site exporter, to
+reuse the same payload builder and browser application without depending on
+the VS Code adapter.
+
+### Static theorem explorer
+
+An initial static exporter builds the theorem explorer, all theorem preview
+fragments, and all Handwave article fragments into one HTML file:
+
+```sh
+npm run export-site -- \
+  --root /path/to/lean/workspace \
+  --output /path/to/site/index.html
+```
+
+If `--root` is omitted, it defaults to the current directory. If `--output` is
+omitted, the exporter writes `handwave-site/index.html` below the selected
+root. The exported data uses repository-relative paths and needs no VS Code
+process, AJAX request, or server-side computation at runtime.
+
+This first static slice provides theorem search, milestone and theorem-status
+filtering, dependency graphs, backlinks, preloaded theorem/proof previews, and in-place
+Handwave article reading. Article links, theorem links, includes, and local
+anchors navigate without network requests. Its front-page Overview lists all
+articles, theorem modules, and milestone theorems in three columns, with each
+entry opening the corresponding reader or explorer view. Its top bar provides
+unified article/module/theorem search, a menu for switching between the
+article reader and theorem explorer, MathJax-rendered search results and selected
+values, a persisted light/dark theme control, and browser Back/Forward history
+for article, theorem-to-theorem, and theorem-explorer navigation. Article and selected-theorem views
+also receive reloadable hash URLs. The article reader has a permanently visible,
+nested table of contents whose sections can be folded and used as scroll targets.
+The article title heads the contents tree, and the active entry follows the reader's
+scroll position without adding history entries.
+Theorem-explorer previews provide the same
+hover text/Lean switches for theorem statements and proofs as article includes.
+Search text remains plain while it is being edited. At export time it uses fresh
+`.ilean` metadata and valid Handwave artifact-cache entries when available.
+Remaining badges are inferred from the source snapshot by propagating direct
+`sorry` and `admit` uses through indexed dependencies; a source-inferred green
+badge is therefore not a substitute for rebuilding Lean artifacts.

@@ -7,6 +7,13 @@ export interface SourceTextEdit {
   text: string;
 }
 
+export interface LeanDeclarationMetadataUpdate {
+  name?: string;
+  statement?: string;
+  proof?: string;
+  tags?: readonly string[];
+}
+
 export function leanDeclarationTagToggleEdit(
   source: string,
   uri: string,
@@ -31,7 +38,88 @@ export function leanDeclarationTagToggleEdit(
 
   return declaration.doc
     ? handwaveDocTagEdit(source, declaration, nextTags)
-    : handwaveDocInsertion(source, declaration, nextTags);
+    : handwaveDocInsertion(source, declaration, { tags: nextTags });
+}
+
+export function leanDeclarationTagSetEdit(
+  source: string,
+  uri: string,
+  declarationName: string,
+  rawTag: string,
+  active: boolean
+): SourceTextEdit | undefined {
+  const tag = normalizeHandwaveTag(rawTag);
+  if (!tag) {
+    return undefined;
+  }
+
+  const declaration = parseLeanDocument(source, uri)
+    .find((item) => item.name === declarationName);
+  if (!declaration) {
+    return undefined;
+  }
+
+  const currentTags = declaration.doc?.tags ?? [];
+  const currentlyActive = currentTags.includes(tag);
+  if (currentlyActive === active) {
+    return { start: 0, end: 0, text: "" };
+  }
+  const nextTags = active
+    ? [...currentTags, tag]
+    : currentTags.filter((item) => item !== tag);
+
+  return declaration.doc
+    ? handwaveDocTagEdit(source, declaration, nextTags)
+    : handwaveDocInsertion(source, declaration, { tags: nextTags });
+}
+
+export function applyLeanDeclarationMetadataUpdate(
+  source: string,
+  uri: string,
+  declarationName: string,
+  update: LeanDeclarationMetadataUpdate
+): string | undefined {
+  const declaration = parseLeanDocument(source, uri)
+    .find((item) => item.name === declarationName);
+  if (!declaration) {
+    return undefined;
+  }
+
+  const normalizedUpdate: Record<string, string | undefined> = {};
+  for (const key of ["name", "statement", "proof"] as const) {
+    if (update[key] !== undefined) {
+      normalizedUpdate[key] = update[key]?.trim();
+    }
+  }
+  if (update.tags !== undefined) {
+    normalizedUpdate.tags = normalizedTags(update.tags).join(", ");
+  }
+
+  if (!declaration.doc) {
+    const fields = Object.fromEntries(
+      Object.entries(normalizedUpdate).filter((entry): entry is [string, string] => Boolean(entry[1]))
+    );
+    if (Object.keys(fields).length === 0) {
+      return source;
+    }
+    return applySourceTextEdit(source, handwaveDocInsertion(source, declaration, fields));
+  }
+
+  let updatedSource = source;
+  for (const [key, value] of Object.entries(normalizedUpdate)) {
+    const currentDeclaration = parseLeanDocument(updatedSource, uri).find((item) =>
+      item.name === declarationName ||
+      (declaration.isPrivate && item.isPrivate && item.sourceName === declaration.sourceName)
+    );
+    if (!currentDeclaration?.doc) {
+      return undefined;
+    }
+    const edit = handwaveDocFieldEdit(updatedSource, currentDeclaration, key, value ?? "");
+    if (edit) {
+      updatedSource = applySourceTextEdit(updatedSource, edit);
+    }
+  }
+  return updatedSource;
 }
 
 export function applySourceTextEdit(source: string, edit: SourceTextEdit): string {
@@ -43,6 +131,15 @@ function handwaveDocTagEdit(
   declaration: LeanDeclaration,
   tags: readonly string[]
 ): SourceTextEdit | undefined {
+  return handwaveDocFieldEdit(source, declaration, "tags", tags.join(", "));
+}
+
+function handwaveDocFieldEdit(
+  source: string,
+  declaration: LeanDeclaration,
+  key: string,
+  value: string
+): SourceTextEdit | undefined {
   const doc = declaration.doc;
   if (!doc) {
     return undefined;
@@ -52,9 +149,9 @@ function handwaveDocTagEdit(
   const docEnd = offsetAtPosition(source, doc.range.end);
   const closeStart = handwaveDocCloseStart(source, docStart, docEnd);
   const closeLineStart = lineStartOffset(source, closeStart);
-  const fieldRange = findHandwaveFieldRange(source, docStart, closeStart, "tags");
+  const fieldRange = findHandwaveFieldRange(source, docStart, closeStart, key);
 
-  if (tags.length === 0) {
+  if (!value) {
     return fieldRange
       ? { start: fieldRange.start, end: fieldRange.end, text: "" }
       : undefined;
@@ -62,8 +159,8 @@ function handwaveDocTagEdit(
 
   const fieldText = handwaveFieldBlock(
     fieldRange?.prefix ?? defaultHandwaveFieldPrefix(source, docStart, closeStart),
-    "tags",
-    tags.join(", "),
+    key,
+    value,
     sourceNewline(source)
   );
   return fieldRange
@@ -74,7 +171,7 @@ function handwaveDocTagEdit(
 function handwaveDocInsertion(
   source: string,
   declaration: LeanDeclaration,
-  tags: readonly string[]
+  fields: Readonly<Record<string, string | readonly string[]>>
 ): SourceTextEdit {
   const declarationStart = offsetAtPosition(source, declaration.range.start);
   const declarationLineStart = lineStartOffset(source, declarationStart);
@@ -82,19 +179,45 @@ function handwaveDocInsertion(
   return {
     start: declarationLineStart,
     end: declarationLineStart,
-    text: handwaveDocBlockWithTags(tags, indent, sourceNewline(source))
+    text: handwaveDocBlock(fields, indent, sourceNewline(source))
   };
 }
 
-function handwaveDocBlockWithTags(tags: readonly string[], indent: string, newline: string): string {
+function handwaveDocBlock(
+  fields: Readonly<Record<string, string | readonly string[]>>,
+  indent: string,
+  newline: string
+): string {
+  const fieldLines = Object.entries(fields).flatMap(([key, rawValue]) => {
+    const value = Array.isArray(rawValue) ? rawValue.join(", ") : String(rawValue);
+    if (!value) {
+      return [];
+    }
+    return [
+      `${indent}${key}:`,
+      ...value.split(/\r?\n/).map((line) => `${indent}  ${line}`)
+    ];
+  });
   return [
     `${indent}/--`,
     `${indent}%%handwave`,
-    `${indent}tags:`,
-    `${indent}  ${tags.join(", ")}`,
+    ...fieldLines,
     `${indent}-/`,
     ""
   ].join(newline);
+}
+
+function normalizedTags(rawTags: readonly string[]): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  for (const rawTag of rawTags) {
+    const tag = normalizeHandwaveTag(rawTag);
+    if (tag && !seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
 }
 
 interface HandwaveFieldRange {

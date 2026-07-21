@@ -24,36 +24,66 @@ const supportedSelectors = [
 ];
 
 export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] {
-  const declarations: LeanDeclaration[] = [];
   const comments = collectDocComments(text);
   const searchableText = blankLeanCommentsAndStrings(text);
+  declarationPattern.lastIndex = 0;
+  const matches = [...searchableText.matchAll(declarationPattern)];
+  const declarationOffsets = matches.map((match) => match.index ?? 0);
+  const namespaces = namespacesAtOffsets(searchableText, declarationOffsets);
+  const scopeEndOffsets = collectScopeEndOffsets(searchableText);
+  const topLevelDocOffsets = [...text.matchAll(/^\/--/gm)].map((match) => {
+    const offset = match.index ?? 0;
+    return offset > 0 && text[offset - 1] === "\n" ? offset - 1 : offset;
+  });
+  const docsByDeclarationOffset = new Map<number, HandwaveDoc>();
+  let declarationIndex = 0;
 
   for (const comment of comments) {
     if (!comment.text.includes("%%handwave")) {
       continue;
     }
-
+    while (
+      declarationIndex < declarationOffsets.length &&
+      declarationOffsets[declarationIndex] < comment.end
+    ) {
+      declarationIndex++;
+    }
+    const declStart = declarationOffsets[declarationIndex];
     const doc = parseHandwaveDoc(comment.text, comment.range, text);
-    const afterComment = searchableText.slice(comment.end);
-    declarationPattern.lastIndex = 0;
-    const match = declarationPattern.exec(afterComment);
-    if (!match) {
+    if (declStart === undefined) {
       doc.errors.push({
         message: "Handwave doc block is not followed by a Lean declaration.",
         range: comment.range
       });
       continue;
     }
+    if (!docsByDeclarationOffset.has(declStart)) {
+      docsByDeclarationOffset.set(declStart, doc);
+    }
+  }
 
-    const declStart = comment.end + match.index;
+  const documented: LeanDeclaration[] = [];
+  const undocumented: LeanDeclaration[] = [];
+  for (let index = 0; index < matches.length; index++) {
+    const match = matches[index];
+    const declStart = declarationOffsets[index];
     const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const sourceName = qualifyLeanName(searchableText, declStart, stripLeanEscapes(match[2]));
+    const namespace = namespaces.get(declStart) ?? [];
+    const localName = stripLeanEscapes(match[2]);
+    const sourceName = namespace.length > 0 ? `${namespace.join(".")}.${localName}` : localName;
     const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
-    const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
+    const statementEnd = nextBoundaryOffset(
+      text.length,
+      declStart,
+      declarationOffsets[index + 1],
+      firstOffsetAfter(topLevelDocOffsets, declStart),
+      firstOffsetAfter(scopeEndOffsets, declStart)
+    );
     const declarationText = text.slice(declStart, statementEnd).trim();
     const parts = splitLeanDeclaration(declarationText);
-    declarations.push({
+    const doc = docsByDeclarationOffset.get(declStart);
+    const declaration: LeanDeclaration = {
       name,
       sourceName,
       kind: match[1],
@@ -65,38 +95,15 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
       nameRange: rangeFromOffsets(text, nameStart, nameStart + match[2].length),
       doc,
       uri
-    });
+    };
+    (doc ? documented : undocumented).push(declaration);
   }
 
-  declarationPattern.lastIndex = 0;
-  for (const match of searchableText.matchAll(declarationPattern)) {
-    const declStart = match.index ?? 0;
-    const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
-    const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const sourceName = qualifyLeanName(searchableText, declStart, stripLeanEscapes(match[2]));
-    const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
-    if (declarations.some((decl) => decl.name === name)) {
-      continue;
-    }
-
-    const statementEnd = findDeclarationStatementEnd(text, searchableText, declStart);
-    const declarationText = text.slice(declStart, statementEnd).trim();
-    const parts = splitLeanDeclaration(declarationText);
-    declarations.push({
-      name,
-      sourceName,
-      kind: match[1],
-      isPrivate,
-      statement: declarationText,
-      leanStatement: parts.leanStatement,
-      leanProof: parts.leanProof,
-      range: rangeFromOffsets(text, declStart, statementEnd),
-      nameRange: rangeFromOffsets(text, nameStart, nameStart + match[2].length),
-      uri
-    });
-  }
-
-  return declarations;
+  const documentedNames = new Set(documented.map((declaration) => declaration.name));
+  return [
+    ...documented,
+    ...undocumented.filter((declaration) => !documentedNames.has(declaration.name))
+  ];
 }
 
 export function parseArticleDocument(text: string, uri: string): ArticleDocument {
@@ -238,6 +245,113 @@ export function normalizeHandwaveTag(value: string): string | undefined {
   return tag;
 }
 
+function namespacesAtOffsets(searchableText: string, offsets: readonly number[]): Map<number, string[]> {
+  type ScopeEntry =
+    | { kind: "namespace"; name: string }
+    | { kind: "section"; name?: string };
+  const result = new Map<number, string[]>();
+  const stack: ScopeEntry[] = [];
+  const namespacePattern = new RegExp(
+    `^\\s*(?:(namespace)[ \\t]+(${leanQualifiedIdentifierSource}(?:[ \\t]+${leanQualifiedIdentifierSource})*)|` +
+      `(section)(?:[ \\t]+(${leanQualifiedIdentifierSource}))?|` +
+      `end(?:[ \\t]+(${leanQualifiedIdentifierSource}))?)(?=\\s|$)`,
+    "gmu"
+  );
+  const events = [...searchableText.matchAll(namespacePattern)];
+  let eventIndex = 0;
+
+  for (const offset of offsets) {
+    while (eventIndex < events.length && (events[eventIndex].index ?? 0) < offset) {
+      updateLeanScope(stack, events[eventIndex]);
+      eventIndex++;
+    }
+    result.set(
+      offset,
+      stack.flatMap((entry) => entry.kind === "namespace" ? [entry.name] : [])
+    );
+  }
+  return result;
+}
+
+function updateLeanScope(
+  stack: Array<{ kind: "namespace"; name: string } | { kind: "section"; name?: string }>,
+  match: RegExpMatchArray
+): void {
+  if (match[1]) {
+    stack.push(
+      ...match[2]
+        .trim()
+        .split(/\s+/)
+        .flatMap((part) => part.split("."))
+        .filter(Boolean)
+        .map((name) => ({ kind: "namespace" as const, name }))
+    );
+    return;
+  }
+  if (match[3]) {
+    stack.push(match[4] ? { kind: "section", name: match[4] } : { kind: "section" });
+    return;
+  }
+
+  const closed = match[5];
+  if (!closed) {
+    stack.pop();
+    return;
+  }
+  const top = stack[stack.length - 1];
+  if (top?.kind === "section" && top.name === closed) {
+    stack.pop();
+    return;
+  }
+  const parts = closed.split(".").filter(Boolean);
+  const namespaceEntries = stack
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.kind === "namespace") as Array<{
+      entry: { kind: "namespace"; name: string };
+      index: number;
+    }>;
+  const suffixStart = namespaceEntries.length - parts.length;
+  if (
+    suffixStart >= 0 &&
+    parts.every((part, index) => namespaceEntries[suffixStart + index].entry.name === part)
+  ) {
+    stack.splice(namespaceEntries[suffixStart].index);
+  } else {
+    stack.pop();
+  }
+}
+
+function collectScopeEndOffsets(searchableText: string): number[] {
+  const pattern = new RegExp(
+    `^[ \\t]*end(?:[ \\t]+${leanQualifiedIdentifierSource})?[ \\t]*(?=\\r?$)`,
+    "gmu"
+  );
+  return [...searchableText.matchAll(pattern)].map((match) => match.index ?? 0);
+}
+
+function firstOffsetAfter(offsets: readonly number[], target: number): number | undefined {
+  let low = 0;
+  let high = offsets.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (offsets[middle] <= target) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return offsets[low];
+}
+
+function nextBoundaryOffset(
+  fallback: number,
+  start: number,
+  ...offsets: Array<number | undefined>
+): number {
+  const candidates = offsets.filter((offset): offset is number => offset !== undefined && offset > start);
+  return candidates.length > 0 ? Math.min(...candidates) : fallback;
+}
+
 function collectDocComments(text: string): Array<{ text: string; start: number; end: number; range: RangeLike }> {
   const comments = [];
   const commentPattern = /\/--[\s\S]*?-\/\s*/g;
@@ -339,23 +453,6 @@ function parseHandwaveDoc(comment: string, range: RangeLike, sourceText: string)
   return { fields: rest, tags: parseHandwaveTags(rest.tags), range, errors };
 }
 
-function findDeclarationStatementEnd(text: string, searchableText: string, start: number): number {
-  const nextDoc = text.indexOf("\n/--", start + 1);
-  declarationPattern.lastIndex = start + 1;
-  const nextDeclaration = declarationPattern.exec(searchableText)?.index ?? -1;
-  const scopeEndPattern = new RegExp(
-    `^[ \\t]*end(?:[ \\t]+${leanQualifiedIdentifierSource})?[ \\t]*(?=\\r?$)`,
-    "gmu"
-  );
-  scopeEndPattern.lastIndex = start + 1;
-  const nextScopeEnd = scopeEndPattern.exec(searchableText)?.index ?? -1;
-  const candidates = [nextDoc, nextDeclaration, nextScopeEnd].filter((index) => index > start);
-  if (candidates.length === 0) {
-    return text.length;
-  }
-  return Math.min(...candidates);
-}
-
 export function blankLeanCommentsAndStrings(source: string): string {
   let result = "";
   let index = 0;
@@ -440,86 +537,6 @@ function stripLeanEscapes(name: string): string {
     return name.slice(1, -1);
   }
   return name;
-}
-
-function qualifyLeanName(searchableText: string, declarationOffset: number, name: string): string {
-  const namespace = namespaceAt(searchableText, declarationOffset);
-  if (!namespace.length) {
-    return name;
-  }
-  return `${namespace.join(".")}.${name}`;
-}
-
-function namespaceAt(searchableText: string, offset: number): string[] {
-  type ScopeEntry =
-    | { kind: "namespace"; name: string }
-    | { kind: "section"; name?: string };
-  const stack: ScopeEntry[] = [];
-  const namespacePattern = new RegExp(
-    `^\\s*(?:(namespace)[ \\t]+(${leanQualifiedIdentifierSource}(?:[ \\t]+${leanQualifiedIdentifierSource})*)|` +
-      `(section)(?:[ \\t]+(${leanQualifiedIdentifierSource}))?|` +
-      `end(?:[ \\t]+(${leanQualifiedIdentifierSource}))?)(?=\\s|$)`,
-    "gmu"
-  );
-  const prefix = searchableText.slice(0, offset);
-
-  for (const match of prefix.matchAll(namespacePattern)) {
-    const openedNamespace = match[1];
-    if (openedNamespace) {
-      stack.push(
-        ...match[2]
-          .trim()
-          .split(/\s+/)
-          .flatMap((part) => part.split("."))
-          .filter(Boolean)
-          .map((name) => ({ kind: "namespace" as const, name }))
-      );
-      continue;
-    }
-
-    const openedSection = match[3];
-    if (openedSection) {
-      const name = match[4];
-      stack.push(name ? { kind: "section", name } : { kind: "section" });
-      continue;
-    }
-
-    const closed = match[5];
-    if (!closed) {
-      stack.pop();
-      continue;
-    }
-
-    const top = stack[stack.length - 1];
-    if (top?.kind === "section" && top.name === closed) {
-      stack.pop();
-      continue;
-    }
-
-    const parts = closed.split(".").filter(Boolean);
-    if (parts.length === 0) {
-      stack.pop();
-      continue;
-    }
-
-    const namespaceEntries = stack
-      .map((entry, index) => ({ entry, index }))
-      .filter(({ entry }) => entry.kind === "namespace") as Array<{
-        entry: { kind: "namespace"; name: string };
-        index: number;
-      }>;
-    const suffixStart = namespaceEntries.length - parts.length;
-    if (
-      suffixStart >= 0 &&
-      parts.every((part, index) => namespaceEntries[suffixStart + index].entry.name === part)
-    ) {
-      stack.splice(namespaceEntries[suffixStart].index);
-    } else {
-      stack.pop();
-    }
-  }
-
-  return stack.flatMap((entry) => (entry.kind === "namespace" ? [entry.name] : []));
 }
 
 function splitLeanDeclaration(declarationText: string): { leanStatement: string; leanProof?: string } {

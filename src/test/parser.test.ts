@@ -23,7 +23,12 @@ import {
   renderLeanDeclarationPreviewHtml,
   renderLeanDocumentHtml
 } from "../handwave/renderer";
-import { applySourceTextEdit, leanDeclarationTagToggleEdit } from "../handwave/tagEditor";
+import {
+  applyLeanDeclarationMetadataUpdate,
+  applySourceTextEdit,
+  leanDeclarationTagSetEdit,
+  leanDeclarationTagToggleEdit
+} from "../handwave/tagEditor";
 import { renderTheoremExplorerHtml } from "../web/explorer";
 
 const leanText = `/--
@@ -440,6 +445,62 @@ end Tagged
   assert.deepEqual(parseLeanDocument(updated, uri)[0].doc?.tags, ["milestone"]);
 });
 
+test("sets declaration tags idempotently and updates metadata fields in place", () => {
+  const uri = "/workspace/Metadata.lean";
+  const source = `/--
+%%handwave
+name:
+  Original title
+statement:
+  Original statement.
+custom:
+  Preserved value.
+tags:
+  draft
+-/
+theorem metadata_result : True := by
+  trivial
+`;
+  const declaration = parseLeanDocument(source, uri)[0];
+  const add = leanDeclarationTagSetEdit(source, uri, declaration.name, "milestone", true);
+  assert.ok(add);
+  const tagged = applySourceTextEdit(source, add);
+  const repeated = leanDeclarationTagSetEdit(tagged, uri, declaration.name, "milestone", true);
+  assert.deepEqual(repeated, { start: 0, end: 0, text: "" });
+  assert.equal(applySourceTextEdit(tagged, repeated), tagged);
+
+  const updated = applyLeanDeclarationMetadataUpdate(tagged, uri, declaration.name, {
+    name: "Updated title",
+    statement: "First paragraph.\n\nSecond paragraph.",
+    proof: "A new proof sketch."
+  });
+  assert.ok(updated);
+  const parsed = parseLeanDocument(updated, uri)[0];
+  assert.equal(parsed.doc?.fields.name, "Updated title");
+  assert.equal(parsed.doc?.fields.statement, "First paragraph.\n\nSecond paragraph.");
+  assert.equal(parsed.doc?.fields.proof, "A new proof sketch.");
+  assert.equal(parsed.doc?.fields.custom, "Preserved value.");
+  assert.deepEqual(parsed.doc?.tags, ["draft", "milestone"]);
+});
+
+test("creates complete Handwave metadata for an undocumented definition", () => {
+  const uri = "/workspace/MetadataDefinition.lean";
+  const source = `namespace Metadata
+
+def undocumented : Nat := 0
+
+end Metadata
+`;
+  const declaration = parseLeanDocument(source, uri)[0];
+  const updated = applyLeanDeclarationMetadataUpdate(source, uri, declaration.name, {
+    name: "The zero object",
+    statement: "This definition denotes zero."
+  });
+  assert.ok(updated);
+  assert.match(updated, /%%handwave\nname:\n  The zero object\nstatement:\n  This definition denotes zero\./);
+  assert.equal(parseLeanDocument(updated, uri)[0].doc?.fields.name, "The zero object");
+});
+
 test("does not index shadow-tagged theorems or let them override ordinary declarations", () => {
   const ordinarySource = `namespace Duplicate
 
@@ -785,6 +846,43 @@ test("keeps includes strict when their target is not a Handwave resource", () =>
 
 test("slugifies section titles", () => {
   assert.equal(slugify("Repeated Addition!"), "repeated-addition");
+});
+
+test("renders article edit controls with original source offsets", () => {
+  const source = [
+    "# Article title",
+    "",
+    "Intro paragraph on two",
+    "source lines.",
+    "",
+    "## Detailed section {#details}",
+    "",
+    "Final paragraph."
+  ].join("\n");
+  const article = parseArticleDocument(source, "/workspace/editable.hw.md");
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const editable = renderArticleFragmentHtml(
+    source,
+    article.uri,
+    index,
+    () => "#",
+    { editableArticles: true }
+  );
+  const readOnly = renderArticleFragmentHtml(source, article.uri, index, () => "#");
+
+  assert.match(
+    editable,
+    new RegExp(`class="article-heading-edit"[^>]*data-edit-offset="${source.indexOf("Article title")}"[^>]*aria-label="Edit this title"`)
+  );
+  assert.match(
+    editable,
+    new RegExp(`class="article-block-edit"[^>]*data-edit-offset="${source.indexOf("Intro paragraph")}"[^>]*aria-label="Edit this paragraph"`)
+  );
+  assert.match(
+    editable,
+    new RegExp(`class="article-heading-edit"[^>]*data-edit-offset="${source.indexOf("Detailed section")}"[^>]*aria-label="Edit this heading"`)
+  );
+  assert.doesNotMatch(readOnly, /data-edit-article/);
 });
 
 test("renders Lean statement includes as theorem views", () => {

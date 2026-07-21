@@ -303,6 +303,8 @@ integration:
   not load the VS Code API at runtime.
 - `src/vscode/` contains the adapters that connect browser messages and shared
   Handwave data to VS Code.
+- `src/server/` contains the loopback HTTP adapter, live-file workspace, and
+  in-place browser editor integration.
 - `src/extension.ts` is the VS Code composition root.
 
 This boundary allows another read-only host, such as a static-site exporter, to
@@ -329,7 +331,7 @@ This first static slice provides theorem search, milestone and theorem-status
 filtering, dependency graphs, backlinks, preloaded theorem/proof previews, and in-place
 Handwave article reading. Article links, theorem links, includes, and local
 anchors navigate without network requests. Its front-page Overview lists all
-articles, theorem modules, and milestone theorems in three columns, with each
+articles and milestone theorems in two columns, with each
 entry opening the corresponding reader or explorer view. Its top bar provides
 unified article/module/theorem search, a menu for switching between the
 article reader and theorem explorer, MathJax-rendered search results and selected
@@ -346,3 +348,19 @@ Search text remains plain while it is being edited. At export time it uses fresh
 Remaining badges are inferred from the source snapshot by propagating direct
 `sorry` and `admit` uses through indexed dependencies; a source-inferred green
 badge is therefore not a substitute for rebuilding Lean artifacts.
+
+### Live repository server
+
+The local server runs the same browser application against the actual Lean
+repository and edits its `.lean`, `.hw`, and `.hw.md` files directly:
+
+```sh
+npm run serve -- --root /path/to/lean/workspace --port 8080
+```
+
+It binds to `127.0.0.1:8080` by default. The browser application works in a
+wiki-like fashion and makes it possible to directly edit the Handwave Markdown
+articles and theorem and definition Handwave metadata within the browser. Saves
+use content revisions and refuse to overwrite a file that changed after the
+browser editor was opened. External edits are picked up by the repository
+watcher and pushed to connected browsers.

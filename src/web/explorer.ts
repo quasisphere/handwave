@@ -58,7 +58,7 @@ export function renderTheoremExplorerHtml(
       <div class="navigation-root">
         <button id="navigation-toggle" class="app-icon-button" type="button" aria-expanded="false" aria-controls="navigation-menu" title="Open navigation" aria-label="Open navigation"><span class="hamburger-icon" aria-hidden="true"></span></button>
         <nav id="navigation-menu" class="navigation-menu" aria-label="Views" hidden>
-          <button class="navigation-item" type="button" data-switch-view="overview" aria-current="page"><span class="navigation-item-title">Overview</span><span class="navigation-item-detail">Browse articles, modules, and milestones</span></button>
+          <button class="navigation-item" type="button" data-switch-view="overview" aria-current="page"><span class="navigation-item-title">Overview</span><span class="navigation-item-detail">Browse articles and milestone theorems</span></button>
           <button class="navigation-item" type="button" data-switch-view="explorer"><span class="navigation-item-title">Theorem explorer</span><span class="navigation-item-detail">Browse the dependency graph</span></button>
           <button id="article-view-navigation" class="navigation-item" type="button" data-switch-view="article" disabled><span class="navigation-item-title">Article view</span><span id="current-article-label" class="navigation-item-detail">Select an article from search</span></button>
         </nav>
@@ -73,16 +73,12 @@ export function renderTheoremExplorerHtml(
     <section id="overview" class="overview-view" aria-label="Handwave overview">
       <header class="overview-header">
         <h1>Overview</h1>
-        <p id="overview-summary">Articles, modules, and milestone theorems</p>
+        <p id="overview-summary">Articles and milestone theorems</p>
       </header>
       <div class="overview-columns">
         <section class="overview-column" aria-labelledby="overview-articles-title">
           <h2 id="overview-articles-title">Articles</h2>
           <div id="overview-articles" class="overview-list"></div>
-        </section>
-        <section class="overview-column" aria-labelledby="overview-modules-title">
-          <h2 id="overview-modules-title">Modules</h2>
-          <div id="overview-modules" class="overview-list"></div>
         </section>
         <section class="overview-column" aria-labelledby="overview-milestones-title">
           <h2 id="overview-milestones-title">Milestone theorems</h2>
@@ -412,7 +408,7 @@ export function renderTheoremExplorerHtml(
     .overview-columns {
       display: grid;
       gap: clamp(12px, 2vw, 22px);
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       margin: 0 auto;
       max-width: 1440px;
       min-height: 0;
@@ -1366,7 +1362,6 @@ export function renderTheoremExplorerHtml(
     const overview = document.getElementById("overview");
     const overviewSummary = document.getElementById("overview-summary");
     const overviewArticles = document.getElementById("overview-articles");
-    const overviewModules = document.getElementById("overview-modules");
     const overviewMilestones = document.getElementById("overview-milestones");
     const themeToggle = document.getElementById("theme-toggle");
     const themeIcon = document.getElementById("theme-icon");
@@ -1543,23 +1538,6 @@ export function renderTheoremExplorerHtml(
       return articleSearchItems.find((article) => article.target === base);
     }
 
-    function overviewModuleItems() {
-      const modules = new Map();
-      for (const theorem of publicTheorems()) {
-        if (theorem.moduleName) {
-          modules.set(theorem.moduleName, (modules.get(theorem.moduleName) || 0) + 1);
-        }
-      }
-      return [...modules.entries()]
-        .sort((first, second) => first[0].localeCompare(second[0]))
-        .map(([moduleName, count]) => ({
-          type: "module",
-          value: moduleName,
-          label: moduleName,
-          detail: String(count) + " theorem" + (count === 1 ? "" : "s")
-        }));
-    }
-
     function overviewArticleItems() {
       return [...articleSearchItems]
         .sort((first, second) =>
@@ -1619,20 +1597,16 @@ export function renderTheoremExplorerHtml(
         !overview ||
         !overviewSummary ||
         !overviewArticles ||
-        !overviewModules ||
         !overviewMilestones
       ) {
         return;
       }
       const articles = overviewArticleItems();
-      const modules = overviewModuleItems();
       const milestones = overviewMilestoneItems();
       overviewSummary.textContent =
         String(articles.length) + " article" + (articles.length === 1 ? "" : "s") + " · " +
-        String(modules.length) + " module" + (modules.length === 1 ? "" : "s") + " · " +
         String(milestones.length) + " milestone theorem" + (milestones.length === 1 ? "" : "s");
       renderOverviewList(overviewArticles, articles, "No articles are available.");
-      renderOverviewList(overviewModules, modules, "No theorem modules are available.");
       renderOverviewList(overviewMilestones, milestones, "No milestone theorems are available.");
       const version = ++overviewMathTypesetVersion;
       queueMathTypeset(
@@ -1644,6 +1618,9 @@ export function renderTheoremExplorerHtml(
     function showArticle(target, updateSearch = false, recordHistory = true) {
       const base = articleTargetBase(target);
       if (!base || !articleHtmlByTarget.has(base)) {
+        if (base && articleItemForTarget(target)) {
+          vscode?.postMessage({ type: "openPreview", target, recordHistory });
+        }
         return false;
       }
       selectedArticleTarget = target;
@@ -2792,9 +2769,13 @@ export function renderTheoremExplorerHtml(
         while (stack.length > 1 && stack[stack.length - 1].level >= level) {
           stack.pop();
         }
+        const labelSource = heading.cloneNode(true);
+        for (const editButton of labelSource.querySelectorAll("[data-edit-article]")) {
+          editButton.remove();
+        }
         const node = {
           id: heading.id,
-          label: heading.textContent?.trim() || heading.id,
+          label: labelSource.textContent?.trim() || heading.id,
           level,
           isTitle: index === 0 && heading.tagName === "H1",
           children: []
@@ -3400,7 +3381,12 @@ export function renderTheoremExplorerHtml(
         const handwaveTarget = tagButton.dataset.handwaveTarget;
         if (tag && handwaveTarget) {
           optimisticallyToggleTag(handwaveTarget, tag);
-          vscode?.postMessage({ type: "toggleTag", target: handwaveTarget, tag });
+          vscode?.postMessage({
+            type: "toggleTag",
+            target: handwaveTarget,
+            tag,
+            active: Boolean(theoremForTarget(handwaveTarget)?.milestone)
+          });
         }
         return;
       }
@@ -3421,6 +3407,18 @@ export function renderTheoremExplorerHtml(
 
     window.addEventListener("message", (event) => {
       const message = event.data || {};
+      if (
+        message.type === "setArticle" &&
+        typeof message.target === "string" &&
+        typeof message.html === "string"
+      ) {
+        const base = articleTargetBase(message.target);
+        if (base) {
+          articleHtmlByTarget.set(base, message.html);
+          showArticle(message.target, true, message.recordHistory !== false);
+        }
+        return;
+      }
       if (
         message.type === "setPreview" &&
         typeof message.name === "string" &&
@@ -3446,10 +3444,15 @@ export function renderTheoremExplorerHtml(
       if (message.type !== "setData" || !message.payload) {
         return;
       }
+      const inlineEditorActive = Boolean(preview.querySelector(".handwave-inline-editor"));
       payload = message.payload;
       theoremMap = createTheoremMap(payload);
       publicTheoremList = payload.theorems.filter((theorem) => !theorem.isPrivate);
+      if (Array.isArray(message.articleItems)) {
+        articleSearchItems.splice(0, articleSearchItems.length, ...message.articleItems);
+      }
       previewHtmlByName.clear();
+      articleHtmlByTarget.clear();
       pendingPreviewRequestIds.clear();
       if (selectedName && !byName().has(selectedName)) {
         selectedName = "";
@@ -3465,7 +3468,16 @@ export function renderTheoremExplorerHtml(
       }
       updateRenderedSearchValue();
       renderSuggestions();
-      if (applicationShellEnabled && application?.dataset.view === "overview") {
+      if (inlineEditorActive) {
+        return;
+      }
+      if (applicationShellEnabled && application?.dataset.view === "article" && selectedArticleTarget) {
+        vscode?.postMessage({
+          type: "openPreview",
+          target: selectedArticleTarget,
+          recordHistory: false
+        });
+      } else if (applicationShellEnabled && application?.dataset.view === "overview") {
         renderOverview();
       } else {
         renderExplorerGraph();

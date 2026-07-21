@@ -17,6 +17,8 @@ interface RenderOptions {
   editorHref?: (target: string) => string;
   sourceLinks?: boolean;
   editableTags?: boolean;
+  editableArticles?: boolean;
+  editableMetadata?: boolean;
 }
 
 interface DeclarationRenderOptions {
@@ -25,6 +27,7 @@ interface DeclarationRenderOptions {
   dependencyTree?: boolean;
   sourceLinks?: boolean;
   editableTags?: boolean;
+  editableMetadata?: boolean;
 }
 
 type LeanCheckStatus = ReturnType<HandwaveIndex["checkStatusForLean"]>;
@@ -58,14 +61,15 @@ export function renderArticleFragmentHtml(
   options: RenderOptions = {}
 ): string {
   const editorHref = options.editorHref ?? commandHref;
-  const withIncludes = text.replace(/@include\{([^}\s]+)\}/g, (_match, target: string) => {
+  const renderInclude = (target: string): string => {
     const parsedTarget = parseTarget(target);
     if (parsedTarget.kind === "lean" && !parsedTarget.selector) {
       const declaration = index.leanDeclarations.get(parsedTarget.base);
       if (declaration) {
         return renderDeclarationPackage(declaration, target, commandHref, editorHref, index, {
           sourceLinks: options.sourceLinks,
-          editableTags: options.editableTags
+          editableTags: options.editableTags,
+          editableMetadata: options.editableMetadata
         });
       }
     }
@@ -80,9 +84,9 @@ export function renderArticleFragmentHtml(
 
     const preview = renderProseParagraphs(resolved.preview, commandHref);
     return `<div class="include" data-target="${escapeHtml(target)}">${preview}</div>`;
-  });
+  };
 
-  return renderBlocks(withIncludes, commandHref);
+  return renderBlocks(text, commandHref, options.editableArticles === true, renderInclude);
 }
 
 export function renderLeanDocumentHtml(
@@ -137,7 +141,7 @@ export function renderLeanDeclarationPreviewHtml(
   index: HandwaveIndex,
   commandHref: (target: string) => string,
   editorHref: (target: string) => string,
-  options: Pick<DeclarationRenderOptions, "sourceLinks"> = {}
+  options: Pick<DeclarationRenderOptions, "sourceLinks" | "editableMetadata"> = {}
 ): string {
   return renderDeclarationPackage(
     declaration,
@@ -148,7 +152,8 @@ export function renderLeanDeclarationPreviewHtml(
     {
       dependencyTree: false,
       milestoneControls: false,
-      sourceLinks: options.sourceLinks
+      sourceLinks: options.sourceLinks,
+      editableMetadata: options.editableMetadata
     }
   );
 }
@@ -843,21 +848,31 @@ ${body}
 </html>`;
 }
 
-function renderBlocks(text: string, commandHref: (target: string) => string): string {
-  const lines = text.split(/\r?\n/);
+function renderBlocks(
+  text: string,
+  commandHref: (target: string) => string,
+  editableArticles = false,
+  renderInclude?: (target: string) => string
+): string {
+  const lines = sourceLines(text);
   const blocks: string[] = [];
   let paragraph: string[] = [];
+  let paragraphOffset = 0;
   let inFence = false;
   let fenceLines: string[] = [];
 
   const flushParagraph = () => {
     if (paragraph.length > 0) {
-      blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" "), commandHref)}</p>`);
+      const editControl = editableArticles
+        ? renderArticleEditControl("article-block-edit", paragraphOffset, "paragraph")
+        : "";
+      blocks.push(`<p${editableArticles ? ` class="article-editable-block"` : ""}>${editControl}${renderInlineArticleMarkdown(paragraph.join(" "), commandHref, renderInclude)}</p>`);
       paragraph = [];
     }
   };
 
-  for (const line of lines) {
+  for (const sourceLine of lines) {
+    const line = sourceLine.text;
     if (line.startsWith("```")) {
       if (inFence) {
         blocks.push(`<pre><code>${escapeHtml(fenceLines.join("\n"))}</code></pre>`);
@@ -880,26 +895,30 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
       continue;
     }
 
+    const include = /^\s*@include\{([^}\s]+)\}\s*$/.exec(line);
+    if (include && renderInclude) {
+      flushParagraph();
+      blocks.push(renderInclude(include[1]));
+      continue;
+    }
+
     const heading = /^(#{1,6})\s+(.+)$/.exec(line);
     if (heading) {
       flushParagraph();
       const level = heading[1].length;
-      const text = heading[2].replace(/\s+\{#[^}]+\}\s*$/, "");
-      const id = slugForHeading(text);
-      blocks.push(`<h${level} id="${escapeHtml(id)}">${renderInlineMarkdown(text, commandHref)}</h${level}>`);
+      const headingText = heading[2].replace(/\s+\{#[^}]+\}\s*$/, "");
+      const id = slugForHeading(headingText);
+      const headingOffset = sourceLine.offset + heading[1].length + line.slice(heading[1].length).search(/\S/);
+      const editControl = editableArticles
+        ? renderArticleEditControl("article-heading-edit", headingOffset, level === 1 ? "title" : "heading")
+        : "";
+      blocks.push(`<h${level} id="${escapeHtml(id)}"${editableArticles ? ` class="article-editable-heading"` : ""}>${editControl}${renderInlineMarkdown(headingText, commandHref)}</h${level}>`);
       continue;
     }
 
-    if (
-      line.startsWith("<div class=\"include") ||
-      line.startsWith("<section class=\"theorem-view\"") ||
-      line.startsWith("<section class=\"definition-view\"")
-    ) {
-      flushParagraph();
-      blocks.push(line);
-      continue;
+    if (paragraph.length === 0) {
+      paragraphOffset = sourceLine.offset + line.search(/\S/);
     }
-
     paragraph.push(line.trim());
   }
 
@@ -909,6 +928,42 @@ function renderBlocks(text: string, commandHref: (target: string) => string): st
   }
 
   return blocks.join("\n");
+}
+
+function sourceLines(text: string): Array<{ text: string; offset: number }> {
+  const lines: Array<{ text: string; offset: number }> = [];
+  const linePattern = /([^\r\n]*)(?:\r\n|\r|\n|$)/g;
+  for (const match of text.matchAll(linePattern)) {
+    if (match[0].length === 0) {
+      break;
+    }
+    lines.push({ text: match[1], offset: match.index });
+  }
+  return lines;
+}
+
+function renderArticleEditControl(className: string, offset: number, blockType: string): string {
+  const label = `Edit this ${blockType}`;
+  return `<button class="${className}" type="button" data-edit-article data-edit-offset="${offset}" title="${label}" aria-label="${label}">Edit</button>`;
+}
+
+function renderInlineArticleMarkdown(
+  text: string,
+  commandHref: (target: string) => string,
+  renderInclude?: (target: string) => string
+): string {
+  if (!renderInclude) {
+    return renderInlineMarkdown(text, commandHref);
+  }
+  const fragments: string[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(/@include\{([^}\s]+)\}/g)) {
+    fragments.push(renderInlineMarkdown(text.slice(cursor, match.index), commandHref));
+    fragments.push(renderInclude(match[1]));
+    cursor = match.index + match[0].length;
+  }
+  fragments.push(renderInlineMarkdown(text.slice(cursor), commandHref));
+  return fragments.join("");
 }
 
 function renderInlineMarkdown(text: string, commandHref: (target: string) => string): string {
@@ -1036,9 +1091,11 @@ function renderTheoremView(
   const milestoneControl = options.milestoneControls === false
     ? ""
     : renderMilestoneTagControl(declaration, target, options.editableTags !== false);
+  const metadataControl = renderMetadataEditControl(target, options.editableMetadata === true);
 
   return compactHtml(`
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
+      ${metadataControl}
       <div class="theorem-statement" data-section="statement" data-mode="text">
         ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName, milestoneControl, options)}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
@@ -1066,9 +1123,11 @@ function renderDefinitionView(
     declaration.doc?.fields.statement ??
     `See the Lean definition for ${declaration.name}.`;
   const label = declarationLabel("Definition", declaration);
+  const metadataControl = renderMetadataEditControl(target, options.editableMetadata === true);
 
   return compactHtml(`
     <section class="definition-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
+      ${metadataControl}
       <div class="definition-statement" data-section="statement" data-mode="text">
         ${renderLabeledProseParagraphs("definition-line", renderDeclarationLabel(label, target, commandHref, editorHref, "Definition view", "", declaration.sourceName, "", options), proseStatement, commandHref)}
         ${renderLeanBlock(declaration.statement)}
@@ -1163,6 +1222,14 @@ function renderMilestoneTagControl(
   const symbol = active ? "★" : "☆";
   const cssClass = active ? "milestone-control-active" : "milestone-control-inactive";
   return `<button class="milestone-control ${cssClass}" type="button" data-toggle-tag="milestone" data-handwave-target="${escapedTarget}" aria-pressed="${String(active)}" title="${label}" aria-label="${label}">${symbol}</button>`;
+}
+
+function renderMetadataEditControl(target: string, editable: boolean): string {
+  if (!editable) {
+    return "";
+  }
+  const escapedTarget = escapeHtml(target);
+  return `<button class="declaration-metadata-edit" type="button" data-edit-declaration="${escapedTarget}" title="Edit Handwave metadata" aria-label="Edit Handwave metadata">Edit</button>`;
 }
 
 function renderDeclarationLabel(

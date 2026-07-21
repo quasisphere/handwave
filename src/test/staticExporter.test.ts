@@ -114,9 +114,9 @@ test("builds a self-contained static theorem explorer without workspace path lea
     assert.match(site.html, /data-switch-view="article"/);
     assert.match(site.html, /placeholder="Search articles, modules, or theorems"/);
     assert.match(site.html, /id="overview-articles"/);
-    assert.match(site.html, /id="overview-modules"/);
+    assert.doesNotMatch(site.html, /id="overview-modules"/);
     assert.match(site.html, /id="overview-milestones"/);
-    assert.match(site.html, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+    assert.match(site.html, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
     assert.match(site.html, /function renderOverview\(\)/);
     assert.match(site.html, /data-overview-type=/);
     assert.match(site.html, /overview\?\.addEventListener\("click"/);

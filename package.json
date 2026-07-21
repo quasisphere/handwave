@@ -194,14 +194,23 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && esbuild src/server/editorClient.js --bundle --format=iife --minify --target=es2022 --outfile=out/server/editorClient.js",
     "export-site": "npm run compile && node out/static/cli.js",
+    "serve": "npm run compile && node out/server/cli.js",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node --test out/test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.8",
     "@types/vscode": "^1.90.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.5.2"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/lang-markdown": "^6.5.1",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.6",
+    "codemirror": "^6.0.2"
   }
 }

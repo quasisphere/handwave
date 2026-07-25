@@ -36,11 +36,21 @@ export async function startHandwaveServer(
   const eventClients = new Set<ServerResponse>();
   let watcher: FSWatcher | undefined;
   const pendingWatchers = new Map<string, NodeJS.Timeout>();
+  let artifactRefreshTimer: NodeJS.Timeout | undefined;
+  let refreshQueue = Promise.resolve();
 
   const broadcastWorkspace = () => {
     for (const response of eventClients) {
       response.write(`event: workspace\ndata: {}\n\n`);
     }
+  };
+
+  const enqueueRefresh = (refresh: () => Promise<boolean>) => {
+    refreshQueue = refreshQueue.then(async () => {
+      if (await refresh()) {
+        broadcastWorkspace();
+      }
+    }).catch(() => undefined);
   };
 
   const server = createServer((request, response) => {
@@ -61,6 +71,16 @@ export async function startHandwaveServer(
         return;
       }
       const relative = rawFile.toString();
+      if (isRelevantArtifact(relative)) {
+        if (artifactRefreshTimer) {
+          clearTimeout(artifactRefreshTimer);
+        }
+        artifactRefreshTimer = setTimeout(() => {
+          artifactRefreshTimer = undefined;
+          enqueueRefresh(() => workspace.refreshArtifacts());
+        }, 260);
+        return;
+      }
       if (!isRelevantSource(relative)) {
         return;
       }
@@ -71,11 +91,7 @@ export async function startHandwaveServer(
       }
       pendingWatchers.set(file, setTimeout(() => {
         pendingWatchers.delete(file);
-        void workspace.refreshFile(file).then((changed) => {
-          if (changed) {
-            broadcastWorkspace();
-          }
-        }).catch(() => undefined);
+        enqueueRefresh(() => workspace.refreshFile(file));
       }, 180));
     });
   }
@@ -88,10 +104,15 @@ export async function startHandwaveServer(
     url,
     async close(): Promise<void> {
       watcher?.close();
+      if (artifactRefreshTimer) {
+        clearTimeout(artifactRefreshTimer);
+        artifactRefreshTimer = undefined;
+      }
       for (const timer of pendingWatchers.values()) {
         clearTimeout(timer);
       }
       pendingWatchers.clear();
+      await refreshQueue;
       for (const response of eventClients) {
         response.end();
       }
@@ -330,6 +351,15 @@ function sendText(response: ServerResponse, status: number, value: string, conte
 
 function isRelevantSource(relative: string): boolean {
   return relative.endsWith(".lean") || relative.endsWith(".hw") || relative.endsWith(".hw.md");
+}
+
+function isRelevantArtifact(relative: string): boolean {
+  const normalized = relative.split(path.sep).join("/");
+  if (normalized === ".lake/handwave/artifact-index-v1.json") {
+    return true;
+  }
+  return normalized.startsWith(".lake/build/") &&
+    (normalized.endsWith(".ilean") || normalized.endsWith(".olean") || normalized.endsWith(".trace"));
 }
 
 function formatHost(host: string): string {

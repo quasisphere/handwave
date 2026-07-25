@@ -23,6 +23,8 @@ export interface LeanIleanArtifact {
 export interface LeanArtifactMetadata {
   declarations: LeanDeclaration[];
   dependencyGraph: Map<string, string[]>;
+  definitionTheoremReferenceGraph: Map<string, string[]>;
+  theoremDefinitionReferenceGraph: Map<string, string[]>;
 }
 
 export interface LeanArtifactExtraction {
@@ -81,12 +83,24 @@ export function applyLeanIleanArtifacts(
   }
 
   const positionedDependencies = new Map<string, Array<{ name: string; line: number; character: number }>>();
+  const positionedDefinitionTheoremReferences =
+    new Map<string, Array<{ name: string; line: number; character: number }>>();
+  const positionedTheoremDefinitionReferences =
+    new Map<string, Array<{ name: string; line: number; character: number }>>();
   const dependencyGraph = new Map<string, string[]>();
+  const definitionTheoremReferenceGraph = new Map<string, string[]>();
+  const theoremDefinitionReferenceGraph = new Map<string, string[]>();
   for (const declaration of updated) {
-    if (declaration.artifactName && isTheoremLikeDeclaration(declaration)) {
-      // An empty entry is significant: this `.ilean` declaration has no
-      // source-level references to another indexed theorem.
+    if (!declaration.artifactName) {
+      continue;
+    }
+    // An empty entry is significant: this `.ilean` declaration has no
+    // source-level references to another indexed theorem.
+    if (isTheoremLikeDeclaration(declaration)) {
       dependencyGraph.set(declaration.name, []);
+      theoremDefinitionReferenceGraph.set(declaration.name, []);
+    } else {
+      definitionTheoremReferenceGraph.set(declaration.name, []);
     }
   }
 
@@ -99,37 +113,70 @@ export function applyLeanIleanArtifacts(
       const referenced = referencedArtifactName
         ? byArtifactName.get(referencedArtifactName)
         : undefined;
-      if (!referenced || !isTheoremLikeDeclaration(referenced)) {
+      if (!referenced) {
         continue;
       }
 
       for (const usage of info.usages ?? []) {
         const parentArtifactName = typeof usage[4] === "string" ? usage[4] : undefined;
         const parent = parentArtifactName ? byArtifactName.get(parentArtifactName) : undefined;
-        if (!parent || !isTheoremLikeDeclaration(parent) || parent.name === referenced.name) {
+        if (!parent || parent.name === referenced.name) {
           continue;
         }
-        const dependencies = positionedDependencies.get(parent.name) ?? [];
-        dependencies.push({
+        const references = isTheoremLikeDeclaration(parent)
+          ? isTheoremLikeDeclaration(referenced)
+            ? positionedDependencies
+            : positionedTheoremDefinitionReferences
+          : isTheoremLikeDeclaration(referenced)
+            ? positionedDefinitionTheoremReferences
+            : undefined;
+        if (!references) {
+          continue;
+        }
+        const parentReferences = references.get(parent.name) ?? [];
+        parentReferences.push({
           name: referenced.name,
           line: numericPosition(usage[0]),
           character: numericPosition(usage[1])
         });
-        positionedDependencies.set(parent.name, dependencies);
+        references.set(parent.name, parentReferences);
       }
     }
   }
 
-  for (const [parent, dependencies] of positionedDependencies) {
-    dependencies.sort((first, second) =>
+  applyPositionedReferences(dependencyGraph, positionedDependencies);
+  applyPositionedReferences(
+    definitionTheoremReferenceGraph,
+    positionedDefinitionTheoremReferences
+  );
+  applyPositionedReferences(
+    theoremDefinitionReferenceGraph,
+    positionedTheoremDefinitionReferences
+  );
+
+  return {
+    declarations: updated,
+    dependencyGraph,
+    definitionTheoremReferenceGraph,
+    theoremDefinitionReferenceGraph
+  };
+}
+
+function applyPositionedReferences(
+  graph: Map<string, string[]>,
+  positionedReferences: ReadonlyMap<
+    string,
+    Array<{ name: string; line: number; character: number }>
+  >
+): void {
+  for (const [parent, references] of positionedReferences) {
+    references.sort((first, second) =>
       first.line - second.line ||
       first.character - second.character ||
       first.name.localeCompare(second.name)
     );
-    dependencyGraph.set(parent, unique(dependencies.map((dependency) => dependency.name)));
+    graph.set(parent, unique(references.map((reference) => reference.name)));
   }
-
-  return { declarations: updated, dependencyGraph };
 }
 
 export function leanArtifactExtractorInput(

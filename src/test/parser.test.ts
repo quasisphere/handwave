@@ -102,13 +102,22 @@ theorem sourceDep : True := by trivial
 
 private theorem privateDep : True := by trivial
 
+def wrappedPrivateDep : True := privateDep
+
+def proofDef : Nat := 0
+
 theorem root : True := by
+  have _ := proofDef
   exact sourceDep
 
 end Demo
 `, uri);
   const sourceDep = declarations.find((declaration) => declaration.sourceName === "Demo.sourceDep")!;
   const privateDep = declarations.find((declaration) => declaration.sourceName === "Demo.privateDep")!;
+  const wrappedPrivateDep = declarations.find(
+    (declaration) => declaration.sourceName === "Demo.wrappedPrivateDep"
+  )!;
+  const proofDef = declarations.find((declaration) => declaration.sourceName === "Demo.proofDef")!;
   const root = declarations.find((declaration) => declaration.sourceName === "Demo.root")!;
   const privateArtifactName = "_private.Demo.0.Demo.privateDep";
   const positions = (declaration: typeof root) => [
@@ -122,6 +131,7 @@ end Demo
     declaration.nameRange.end.character
   ];
   const referenceKey = JSON.stringify({ c: { m: "Demo", n: privateArtifactName } });
+  const proofDefReferenceKey = JSON.stringify({ c: { m: "Demo", n: "Demo.proofDef" } });
   const ilean = JSON.stringify({
     version: 5,
     module: "Demo",
@@ -129,11 +139,29 @@ end Demo
     decls: {
       "Demo.sourceDep": positions(sourceDep),
       [privateArtifactName]: positions(privateDep),
+      "Demo.wrappedPrivateDep": positions(wrappedPrivateDep),
+      "Demo.proofDef": positions(proofDef),
       "Demo.root": positions(root)
     },
     references: {
       [referenceKey]: {
         definition: positions(privateDep).slice(4),
+        usages: [[
+          root.nameRange.start.line,
+          root.nameRange.start.character,
+          root.nameRange.end.line,
+          root.nameRange.end.character,
+          "Demo.root"
+        ], [
+          wrappedPrivateDep.nameRange.start.line,
+          wrappedPrivateDep.nameRange.start.character,
+          wrappedPrivateDep.nameRange.end.line,
+          wrappedPrivateDep.nameRange.end.character,
+          "Demo.wrappedPrivateDep"
+        ]]
+      },
+      [proofDefReferenceKey]: {
+        definition: positions(proofDef).slice(4),
         usages: [[
           root.nameRange.start.line,
           root.nameRange.start.character,
@@ -151,9 +179,24 @@ end Demo
     privateArtifactName
   );
   assert.deepEqual(metadata.dependencyGraph.get(root.name), [privateDep.name]);
+  assert.deepEqual(
+    metadata.definitionTheoremReferenceGraph.get(wrappedPrivateDep.name),
+    [privateDep.name]
+  );
+  assert.deepEqual(metadata.theoremDefinitionReferenceGraph.get(root.name), [proofDef.name]);
 
-  const index = new HandwaveIndex("/workspace", metadata.declarations, [], new Map(), metadata.dependencyGraph);
+  const index = new HandwaveIndex(
+    "/workspace",
+    metadata.declarations,
+    [],
+    new Map(),
+    metadata.dependencyGraph,
+    metadata.definitionTheoremReferenceGraph,
+    metadata.theoremDefinitionReferenceGraph
+  );
   assert.deepEqual(index.dependenciesForLean(root.name), [privateDep.name]);
+  assert.deepEqual(index.proofDefinitionsForLean(root.name), [proofDef.name]);
+  assert.deepEqual(index.theoremReferencesForDefinition(wrappedPrivateDep.name), [privateDep.name]);
 });
 
 test("generates and parses structured Lean artifact extraction records", () => {
@@ -432,6 +475,7 @@ test("creates a Handwave block when directly tagging an undocumented theorem", (
   const uri = "/workspace/Bare.lean";
   const source = `namespace Tagged
 
+  @[simp]
   theorem bare_result : True := by
     trivial
 
@@ -441,7 +485,7 @@ end Tagged
   const edit = leanDeclarationTagToggleEdit(source, uri, declaration.name, "milestone");
   assert.ok(edit);
   const updated = applySourceTextEdit(source, edit);
-  assert.match(updated, /  \/--\n  %%handwave\n  tags:\n    milestone\n  -\/\n  theorem bare_result/);
+  assert.match(updated, /  \/--\n  %%handwave\n  tags:\n    milestone\n  -\/\n  @\[simp\]\n  theorem bare_result/);
   assert.deepEqual(parseLeanDocument(updated, uri)[0].doc?.tags, ["milestone"]);
 });
 
@@ -487,6 +531,8 @@ test("creates complete Handwave metadata for an undocumented definition", () => 
   const uri = "/workspace/MetadataDefinition.lean";
   const source = `namespace Metadata
 
+/-- Existing Lean documentation that should remain above the Handwave metadata. -/
+@[simp]
 def undocumented : Nat := 0
 
 end Metadata
@@ -497,11 +543,63 @@ end Metadata
     statement: "This definition denotes zero."
   });
   assert.ok(updated);
+  assert.match(
+    updated,
+    /\/--\nExisting Lean documentation that should remain above the Handwave metadata\.\n\n%%handwave/
+  );
   assert.match(updated, /%%handwave\nname:\n  The zero object\nstatement:\n  This definition denotes zero\./);
+  assert.equal((updated.match(/\/--/g) ?? []).length, 1);
+  assert.match(updated, /-\/\n@\[simp\]\ndef undocumented : Nat := 0/);
   assert.equal(parseLeanDocument(updated, uri)[0].doc?.fields.name, "The zero object");
 });
 
-test("does not index shadow-tagged theorems or let them override ordinary declarations", () => {
+test("preserves an adjacent ordinary docstring above newly inserted Handwave metadata", () => {
+  const uri = "/workspace/DocumentedDefinition.lean";
+  const source = `namespace Metadata
+
+  /--
+  A documented surface-like class.
+
+  name:
+  This line is part of the ordinary Lean documentation.
+
+  Its original prose should be retained.
+  -/
+  class SurfaceLike (X : Type*) : Prop where
+    witness : True
+
+end Metadata
+`;
+  const declaration = parseLeanDocument(source, uri)[0];
+  const updated = applyLeanDeclarationMetadataUpdate(source, uri, declaration.name, {
+    name: "Surface-like space",
+    statement: ""
+  });
+  assert.ok(updated);
+  assert.equal((updated.match(/\/--/g) ?? []).length, 1);
+  assert.match(
+    updated,
+    /  \/--\n  A documented surface-like class\.\n  \n  name:\n  This line is part of the ordinary Lean documentation\.\n  \n  Its original prose should be retained\.\n\n  %%handwave/
+  );
+  assert.match(updated, /  %%handwave\n  name:\n    Surface-like space/);
+  assert.doesNotMatch(updated, /  statement:/);
+  assert.match(updated, /  -\/\n  class SurfaceLike/);
+  const parsed = parseLeanDocument(updated, uri)[0];
+  assert.equal(parsed.doc?.fields.statement, undefined);
+  assert.equal(parsed.doc?.fields.name, "Surface-like space");
+
+  const renamed = applyLeanDeclarationMetadataUpdate(updated, uri, declaration.name, {
+    name: "Renamed surface-like space"
+  });
+  assert.ok(renamed);
+  assert.match(
+    renamed,
+    /  name:\n  This line is part of the ordinary Lean documentation\.\n[\s\S]*  %%handwave\n  name:\n    Renamed surface-like space/
+  );
+  assert.equal(parseLeanDocument(renamed, uri)[0].doc?.fields.name, "Renamed surface-like space");
+});
+
+test("does not index shadow-tagged declarations or let them override ordinary declarations", () => {
   const ordinarySource = `namespace Duplicate
 
 /--
@@ -511,6 +609,13 @@ statement:
 -/
 theorem result : True := by
   trivial
+
+/--
+%%handwave
+statement:
+  The project value is zero.
+-/
+def value : Nat := 0
 
 end Duplicate
 `;
@@ -526,26 +631,50 @@ statement:
 theorem result : True := by
   sorry
 
+/--
+%%handwave
+tags:
+  shadow
+statement:
+  The challenge value is one.
+-/
+def value : Nat := 1
+
 end Duplicate
 `;
-  const ordinary = parseLeanDocument(ordinarySource, "/workspace/Project.lean")[0];
-  const shadow = parseLeanDocument(shadowSource, "/workspace/Challenge.lean")[0];
+  const ordinaryDeclarations = parseLeanDocument(ordinarySource, "/workspace/Project.lean");
+  const shadowDeclarations = parseLeanDocument(shadowSource, "/workspace/Challenge.lean");
+  const ordinary = ordinaryDeclarations[0];
+  const shadow = shadowDeclarations[0];
+  const ordinaryDefinition = ordinaryDeclarations[1];
+  const shadowDefinition = shadowDeclarations[1];
   assert.equal(ordinary.name, shadow.name);
+  assert.equal(ordinaryDefinition.name, shadowDefinition.name);
   assert.equal(isIndexedLeanDeclaration(ordinary), true);
   assert.equal(isIndexedLeanDeclaration(shadow), false);
+  assert.equal(isIndexedLeanDeclaration(ordinaryDefinition), true);
+  assert.equal(isIndexedLeanDeclaration(shadowDefinition), false);
 
-  const declarations = [ordinary, shadow];
+  const declarations = [...ordinaryDeclarations, ...shadowDeclarations];
   const index = new HandwaveIndex("/workspace", declarations, []);
   assert.equal(index.leanDeclarations.get(ordinary.name)?.uri, ordinary.uri);
+  assert.equal(index.leanDeclarations.get(ordinaryDefinition.name)?.uri, ordinaryDefinition.uri);
   assert.equal(index.resolve(`lean:${ordinary.name}`)?.preview, ordinary.leanStatement);
+  assert.equal(
+    index.resolve(`lean:${ordinaryDefinition.name}`)?.preview,
+    ordinaryDefinition.leanStatement
+  );
   assert.doesNotMatch(index.leanDeclarations.get(ordinary.name)?.leanProof ?? "", /\bsorry\b/);
 
   const explorer = buildTheoremExplorerPayload(index, declarations, ["/workspace"]);
   assert.equal(explorer.theoremCount, 1);
+  assert.equal(explorer.definitionCount, 1);
   assert.deepEqual(explorer.theorems.map((theorem) => theorem.uri), [ordinary.uri]);
+  assert.deepEqual(explorer.definitions.map((definition) => definition.uri), [ordinaryDefinition.uri]);
 
-  const shadowOnlyIndex = new HandwaveIndex("/workspace", [shadow], []);
+  const shadowOnlyIndex = new HandwaveIndex("/workspace", shadowDeclarations, []);
   assert.equal(shadowOnlyIndex.resolve(`lean:${shadow.name}`), undefined);
+  assert.equal(shadowOnlyIndex.resolve(`lean:${shadowDefinition.name}`), undefined);
   assert.equal(shadowOnlyIndex.checkStatusForLean(shadow.name), undefined);
   assert.deepEqual(shadowOnlyIndex.dependenciesForLean(shadow.name), []);
   const shadowPreview = renderLeanDocumentHtml(
@@ -556,6 +685,7 @@ end Duplicate
   );
   assert.match(shadowPreview, /No Lean declarations were found in this file\./);
   assert.doesNotMatch(shadowPreview, /<section class="theorem-view"/);
+  assert.doesNotMatch(shadowPreview, /<section class="definition-view"/);
 });
 
 test("parses namespace-qualified Lean declaration names", () => {
@@ -914,6 +1044,8 @@ test("renders Lean statement includes as theorem views", () => {
   );
 
   assert.equal(html.includes(fragment), true);
+  assert.match(html, /a \{\s*color: [^;]+;\s*text-decoration: none;/);
+  assert.doesNotMatch(html, /text-decoration:\s*underline/);
   assert.match(html, /<a href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="lean:my_add_assoc">parentheses do not matter<\/a>/);
   assert.match(html, /<strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
   assert.match(html, /class="check-status check-status-checked"[^>]*aria-label="Lean checked">✓<\/span><span class="declaration-label"><strong><a class="declaration-link" href="command:lean:my_add_assoc" data-handwave-target="lean:my_add_assoc" title="Open lean:my_add_assoc">Theorem \(Addition associativity\)\.<\/a><\/strong>/);
@@ -1018,6 +1150,9 @@ proof:
 theorem base_theorem : True := by
   trivial
 
+def theorem_backed_definition : True :=
+  base_theorem
+
 /--
 %%handwave
 name:
@@ -1035,6 +1170,8 @@ theorem derived_theorem : True := by
     "",
     "[the base theorem](lean:base_theorem)",
     "",
+    "[the theorem-backed definition](lean:theorem_backed_definition)",
+    "",
     "@include{lean:base_theorem.statement}"
   ].join("\n"), "/workspace/notes/explorer.hw.md");
   const index = new HandwaveIndex("/workspace", declarations, [article], new Map([
@@ -1042,8 +1179,24 @@ theorem derived_theorem : True := by
   ]));
   const payload = buildTheoremExplorerPayload(index, declarations, ["/workspace"]);
   const base = payload.theorems.find((theorem) => theorem.name === "base_theorem");
+  const theoremBackedDefinition = payload.definitions.find(
+    (definition) => definition.name === "theorem_backed_definition"
+  );
 
   assert.deepEqual(base?.dependents.map((link) => link.target), ["lean:derived_theorem"]);
+  assert.deepEqual(
+    base?.referencingDefinitions.map((link) => link.target),
+    ["lean:theorem_backed_definition"]
+  );
+  assert.deepEqual(
+    theoremBackedDefinition?.theorems.map((link) => link.target),
+    ["lean:base_theorem"]
+  );
+  assert.deepEqual(
+    theoremBackedDefinition?.references.map((link) => link.target),
+    ["article:notes/explorer.hw.md"]
+  );
+  assert.equal(theoremBackedDefinition?.references[0]?.label, "notes/explorer.hw.md");
   assert.deepEqual(base?.references.map((link) => link.target), ["article:notes/explorer.hw.md"]);
   assert.equal(base?.references[0]?.label, "notes/explorer.hw.md");
   assert.match(base?.statusHtml ?? "", /class="check-status check-status-checked"[^>]*>✓<\/span>/);
@@ -1051,6 +1204,8 @@ theorem derived_theorem : True := by
   assert.equal(Object.hasOwn(base ?? {}, "previewHtml"), false);
 
   const html = renderTheoremExplorerHtml(payload);
+  assert.match(html, /a \{\s*color: [^;]+;\s*text-decoration: none;/);
+  assert.doesNotMatch(html, /text-decoration:\s*underline/);
   assert.match(html, /const previewHtmlByName = new Map\(\);/);
   assert.match(html, /const articleHtmlByTarget = new Map\(\);/);
   assert.match(html, /const articleSearchItems = \[\];/);
@@ -1061,7 +1216,7 @@ theorem derived_theorem : True := by
   assert.doesNotMatch(html, /id="theme-toggle"/);
   assert.match(
     html,
-    /injectPreviewMilestoneControl\(previewHtml, theorem\) \+ renderViewerInfo\(theorem\)/
+    /\(theorem \? injectPreviewMilestoneControl\(previewHtml, theorem\) : previewHtml\) \+ viewerInfo/
   );
   assert.equal(html, renderTheoremExplorerHtml(payload, {}));
   assert.match(
@@ -1069,7 +1224,126 @@ theorem derived_theorem : True := by
     /!link\.closest\("\.viewer-info"\) \|\| !openTargetLocally\(targetName\)/
   );
   assert.match(html, /type: "requestPreview"/);
+  assert.match(html, /\.viewer-info-item-proof \{\s*font-style: italic;/);
+  assert.match(html, /const itemClass = link\.proofOnly \? ' class="viewer-info-item-proof"'/);
+  assert.match(html, /function createDefinitionMap\(sourcePayload\)/);
+  assert.match(html, /function restrictToDefinition\(definition\)/);
+  assert.match(html, /searchSelection\?\.type === "definition"/);
+  assert.match(html, /Definitions using this definition/);
+  assert.match(html, /Definitions using this theorem/);
+  assert.match(html, /Definitions used in the statement of this theorem/);
+  assert.match(html, /Definitions used in the proof of this theorem/);
+  assert.match(html, /Theorems used by this definition/);
+  assert.match(html, /Definitions used by this definition/);
+  assert.match(
+    html,
+    /function renderDefinitionViewerInfo\(definition\) \{[\s\S]*?"Handwave articles referencing this definition",[\s\S]*?definition\?\.references[\s\S]*?"Definitions using this definition"/
+  );
+  assert.match(
+    html,
+    /definition\.referencingTheorems[\s\S]*?theoremPassesExplorerFilters\(theorem\)/
+  );
+  assert.match(html, /function graphTheoremMap\(\)/);
+  assert.match(
+    html,
+    /searchSelection\?\.type !== "definition"[\s\S]*?return new Map\(theorems\.map\(\(theorem\) => \[theorem\.name, theorem\]\)\);/
+  );
+  assert.match(html, /const theoremMap = graphTheoremMap\(\);/);
+  assert.match(html, /const layout = layoutGraph\(roots, theoremMap\);/);
+  assert.doesNotMatch(html, /searchSelection\?\.type !== "definition"\);/);
+  assert.match(
+    html,
+    /function renderDefinitionViewerInfo\(definition\) \{[\s\S]*?"Handwave articles referencing this definition",[\s\S]*?"Definitions using this definition",[\s\S]*?"Theorems used by this definition",[\s\S]*?"Definitions used by this definition",/
+  );
+  assert.match(
+    html,
+    /function renderViewerInfo\(theorem\) \{[\s\S]*?"Handwave articles referencing this theorem",[\s\S]*?"Theorems using this theorem",[\s\S]*?"Definitions using this theorem",[\s\S]*?"Definitions used in the statement of this theorem",[\s\S]*?"Definitions used in the proof of this theorem",/
+  );
+  assert.match(html, /No Handwave article cites this theorem\./);
+  assert.match(html, /No other theorem uses this theorem\./);
+  assert.match(html, /No definition uses this theorem\./);
+  assert.match(
+    html,
+    /The statement of the theorem does not reference indexed definitions\./
+  );
+  assert.match(
+    html,
+    /The proof of the theorem does not reference indexed definitions\./
+  );
+  assert.match(html, /No Handwave article cites this definition\./);
+  assert.match(html, /No other definition uses this definition\./);
+  assert.match(html, /This definition does not use indexed theorems\./);
+  assert.match(html, /This definition does not use other indexed definitions\./);
+  assert.match(
+    html,
+    /suggestion-group-title">Theorems[\s\S]*?suggestion-group-title">Definitions[\s\S]*?suggestion-group-title">Modules/
+  );
+  assert.match(html, /\.preview \.definition-references \{\s*border-top: 1px solid var\(--border\);/);
+  assert.match(html, /\.preview \.definition-reference-list \{\s*display: grid;\s*gap: 4px;/);
+  assert.match(
+    html,
+    /const definition = definitionForTarget\(targetName\);[\s\S]*?restrictToDefinition\(definition\);/
+  );
   assert.match(html, /message\.type === "setPreview"/);
+  assert.match(html, /const handwaveViewModes = new Map\(\);/);
+  assert.match(html, /const viewerInfoSectionExpansion = new Map\(\);/);
+  assert.match(html, /function handwaveSectionKey\(section\)/);
+  assert.match(html, /function rememberHandwaveViewModes\(root\)/);
+  assert.match(html, /function restoreHandwaveViewModes\(root\)/);
+  assert.match(html, /function captureArticleScrollPosition\(\)/);
+  assert.match(html, /function restoreArticleScrollPosition\(position\)/);
+  assert.match(html, /function articleHeadingThreshold\(previewTop\)/);
+  assert.equal((html.match(/articleHeadingThreshold\(previewTop\)/g) ?? []).length, 3);
+  assert.match(html, /function captureExplorerScrollPosition\(\)/);
+  assert.match(html, /function restoreExplorerGraphScrollPosition\(position\)/);
+  assert.match(html, /function retainExplorerPreviewScrollPosition\(position\)/);
+  assert.match(html, /function restoreExplorerPreviewScrollPosition\(position\)/);
+  assert.match(html, /renderExplorerGraph\(explorerScrollPosition\)/);
+  assert.match(html, /restoreExplorerGraphScrollPosition\(layout\.scrollPosition\);/);
+  assert.match(
+    html,
+    /restoreExplorerPreviewScrollPosition\(explorerScrollPosition\);[\s\S]*?queueMathTypeset\([\s\S]*?restoreExplorerPreviewScrollPosition\(explorerScrollPosition\)/
+  );
+  assert.match(html, /function overviewArticlePathParts\(relativePath\)/);
+  assert.match(html, /parts\[0\]\?\.toLowerCase\(\) === "handwave"/);
+  assert.match(html, /function buildOverviewArticleTree\(items\)/);
+  assert.match(html, /function renderOverviewArticleFolder\(node\)/);
+  assert.match(html, /sortedOverviewArticleFolders\(node\)\.map\(renderOverviewArticleFolder\)/);
+  assert.match(html, /sortedOverviewFolderArticles\(node\)\.map\(renderOverviewItem\)/);
+  assert.match(html, /data-overview-folder-toggle/);
+  assert.match(html, /overviewArticleFolderExpansion\.set\(folderPath, !expanded\)/);
+  assert.match(
+    html,
+    /function focusSelectedArticleAnchor\(\) \{[\s\S]*?if \(hashIndex < 0\) \{\s*preview\.scrollTop = 0;\s*updateArticleTocSelectionFromScroll\(\);/
+  );
+  assert.match(html, /pendingArticleScrollPosition = message\.preserveScroll === true/);
+  assert.match(html, /preserveScroll: true/);
+  assert.match(html, /\.preview \{[\s\S]*?overflow-anchor: none;/);
+  assert.doesNotMatch(html, /restoredScrollTop/);
+  assert.match(
+    html,
+    /queueMathTypeset\([\s\S]*?if \(scrollPosition\) \{\s*restoreArticleScrollPosition\(scrollPosition\);\s*\} else \{\s*focusSelectedArticleAnchor\(\);/
+  );
+  assert.match(
+    html,
+    /function replacePreviewContent\(htmlContent\) \{\s*rememberHandwaveViewModes\(preview\);\s*rememberViewerInfoSectionExpansion\(preview\);\s*replaceTypesetContent\(preview, htmlContent\);\s*restoreHandwaveViewModes\(preview\);\s*restoreViewerInfoSectionExpansion\(preview\);/
+  );
+  assert.match(html, /function viewerInfoSectionKey\(section\)/);
+  assert.match(html, /function rememberViewerInfoSectionExpansion\(root\)/);
+  assert.match(html, /function restoreViewerInfoSectionExpansion\(root\)/);
+  assert.match(
+    html,
+    /'<details class="viewer-info-section" data-viewer-info-section="' \+ html\(title\) \+ '" open>'/
+  );
+  assert.match(
+    html,
+    /'<summary class="viewer-info-title">' \+ html\(title\) \+ '<\/summary>'/
+  );
+  assert.match(html, /applyHandwaveSectionMode\(section, nextMode, lastMode\)[\s\S]*?rememberHandwaveViewMode\(section\);/);
+  assert.match(
+    html,
+    /replacePreviewContent\(\s*\(theorem \? injectPreviewMilestoneControl\(previewHtml, theorem\) : previewHtml\) \+ viewerInfo/
+  );
   assert.match(html, /message\.type === "setStatuses"/);
   assert.equal((html.match(/data-status-filter="/g) ?? []).length, 4);
   assert.match(html, /data-status-filter="green"[^>]*>✓<\/button>/);
@@ -1088,6 +1362,162 @@ theorem derived_theorem : True := by
   );
   const scripts = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)];
   assert.doesNotThrow(() => new Function(scripts.at(-1)?.[1] ?? ""));
+});
+
+test("indexes theorem statement and proof definition references separately", () => {
+  const declarations = parseLeanDocument(`namespace Other
+
+def used (value : Nat) : Nat := value
+
+end Other
+
+namespace Demo
+
+def seed : Nat := 0
+
+def used (value : Nat) : Nat := seed + value
+
+def proofOnly : True := True.intro
+
+theorem proof_only_statement : proofOnly = True.intro := by
+  rfl
+
+structure Box where
+  value : Nat
+
+def Box.measure (box : Box) : Nat := box.value
+
+namespace Box
+
+variable (system : Box)
+
+def HasLocalTransitions : Prop := True
+
+structure SingleValuedContinuation where
+  value : Nat
+
+theorem section_variable_refs
+    (htransitions : system.HasLocalTransitions) :
+    Nonempty system.SingleValuedContinuation := by
+  exact ⟨{ value := system.value }⟩
+
+end Box
+
+theorem statement_helper : True := True.intro
+
+/--
+%%handwave
+name:
+  A theorem using definitions
+statement:
+  The theorem compares the two values.
+proof:
+  The result follows immediately.
+-/
+theorem statement_refs (x : Nat) (box : Box) : used x = box.measure := by
+  have _ := proofOnly
+  have _ := used x
+  exact statement_helper
+
+end Demo
+`, "/workspace/Definitions.lean");
+  const index = new HandwaveIndex("/workspace", declarations, []);
+  const theorem = declarations.find((declaration) => declaration.sourceName === "Demo.statement_refs");
+  const sectionVariableTheorem = declarations.find(
+    (declaration) => declaration.sourceName === "Demo.Box.section_variable_refs"
+  );
+  assert.ok(theorem);
+  assert.ok(sectionVariableTheorem);
+  assert.ok(sectionVariableTheorem.contextNames?.includes("system"));
+  assert.doesNotMatch((theorem.contextNames ?? []).join(" "), /\bsystem\b/);
+
+  assert.deepEqual(index.statementDefinitionsForLean(theorem.name), [
+    "Demo.Box",
+    "Demo.used",
+    "Demo.Box.measure"
+  ]);
+  assert.doesNotMatch(
+    index.statementDefinitionsForLean(theorem.name).join(" "),
+    /proofOnly|Other\.used/
+  );
+  assert.deepEqual(index.proofDefinitionsForLean(theorem.name), ["Demo.proofOnly"]);
+  assert.deepEqual(index.definitionReferencesForLean("Demo.used"), ["Demo.seed"]);
+  assert.deepEqual(index.definitionReferencesForLean("Demo.seed"), []);
+  assert.deepEqual(index.definitionReferencesForLean(theorem.name), []);
+  assert.deepEqual(
+    index.statementDefinitionsForLean(sectionVariableTheorem.name),
+    [
+      "Demo.Box.HasLocalTransitions",
+      "Demo.Box.SingleValuedContinuation"
+    ]
+  );
+
+  const preview = renderLeanDeclarationPreviewHtml(
+    theorem,
+    index,
+    (target) => `command:${target}`,
+    (target) => `editor:${target}`
+  );
+  assert.doesNotMatch(preview, /aria-label="Definitions referenced in theorem statement"/);
+  const hover = renderArticleHtml(
+    "@include{lean:Demo.statement_refs}",
+    "/workspace/definition-references.hw.md",
+    index,
+    (target) => `command:${target}`
+  );
+  const dependencyTreeIndex = hover.indexOf('aria-label="Dependency tree"');
+  const definitionReferencesIndex = hover.indexOf(
+    'aria-label="Definitions referenced in theorem statement"'
+  );
+  assert.ok(dependencyTreeIndex >= 0);
+  assert.ok(definitionReferencesIndex > dependencyTreeIndex);
+  assert.match(hover, />Definitions</);
+  assert.match(hover, /font-variant-caps: all-small-caps;/);
+  assert.match(hover, /\.definition-reference-list \{\s*display: grid;\s*gap: 4px;/);
+  assert.match(hover, /data-handwave-target="lean:Demo\.Box"/);
+  assert.match(hover, /data-handwave-target="lean:Demo\.used"/);
+  assert.match(hover, /data-handwave-target="lean:Demo\.Box\.measure"/);
+  assert.doesNotMatch(preview, /data-handwave-target="lean:Demo\.proofOnly"/);
+  assert.doesNotMatch(preview, /data-handwave-target="lean:Other\.used"/);
+
+  const payload = buildTheoremExplorerPayload(index, declarations, ["/workspace"]);
+  const explorerTheorem = payload.theorems.find((item) => item.name === theorem.name);
+  const usedDefinition = payload.definitions.find((item) => item.name === "Demo.used");
+  const proofOnlyDefinition = payload.definitions.find(
+    (item) => item.name === "Demo.proofOnly"
+  );
+  const seedDefinition = payload.definitions.find((item) => item.name === "Demo.seed");
+  assert.deepEqual(
+    explorerTheorem?.definitions.map((link) => link.target),
+    ["lean:Demo.Box", "lean:Demo.used", "lean:Demo.Box.measure", "lean:Demo.proofOnly"]
+  );
+  assert.deepEqual(
+    explorerTheorem?.definitions.map((link) => link.proofOnly ?? false),
+    [false, false, false, true]
+  );
+  assert.deepEqual(
+    usedDefinition?.definitions.map((link) => link.target),
+    ["lean:Demo.seed"]
+  );
+  assert.deepEqual(
+    usedDefinition?.referencingTheorems.map((link) => link.target),
+    ["lean:Demo.statement_refs"]
+  );
+  assert.equal(usedDefinition?.referencingTheorems[0]?.proofOnly, undefined);
+  assert.deepEqual(
+    proofOnlyDefinition?.referencingTheorems.map((link) => ({
+      target: link.target,
+      proofOnly: link.proofOnly ?? false
+    })),
+    [
+      { target: "lean:Demo.proof_only_statement", proofOnly: false },
+      { target: "lean:Demo.statement_refs", proofOnly: true }
+    ]
+  );
+  assert.deepEqual(
+    seedDefinition?.referencingDefinitions.map((link) => link.target),
+    ["lean:Demo.used"]
+  );
 });
 
 test("typesets only theorem explorer graph titles that contain math", () => {

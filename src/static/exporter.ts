@@ -57,7 +57,9 @@ export async function buildHandwaveStaticSite(rootDirectory: string): Promise<Ha
     indexedDeclarations,
     articles,
     artifactMetadata.statuses,
-    artifactMetadata.dependencyGraph
+    artifactMetadata.dependencyGraph,
+    artifactMetadata.definitionTheoremReferenceGraph,
+    artifactMetadata.theoremDefinitionReferenceGraph
   );
   const payload = sanitizeStaticPayload(
     buildTheoremExplorerPayload(index, indexedDeclarations, [root])
@@ -66,13 +68,13 @@ export async function buildHandwaveStaticSite(rootDirectory: string): Promise<Ha
   const articleHtmlByTarget = new Map<string, string>();
   const articleItems: TheoremExplorerArticleItem[] = [];
 
-  for (const theorem of payload.theorems) {
-    const declaration = index.leanDeclarations.get(theorem.name);
+  for (const item of [...payload.theorems, ...payload.definitions]) {
+    const declaration = index.leanDeclarations.get(item.name);
     if (!declaration) {
       continue;
     }
     previewHtmlByName.set(
-      theorem.name,
+      item.name,
       renderLeanDeclarationPreviewHtml(declaration, index, () => "#", () => "#", {
         sourceLinks: false
       })
@@ -168,6 +170,16 @@ async function parseArticleFiles(files: readonly string[]): Promise<StaticArticl
 function sanitizeStaticPayload(payload: TheoremExplorerPayload): TheoremExplorerPayload {
   return {
     ...payload,
+    definitions: payload.definitions.map((definition) => ({
+      ...definition,
+      uri: webPath(definition.relativePath),
+      relativePath: webPath(definition.relativePath),
+      references: definition.references.map((reference) => ({
+        ...reference,
+        target: webPath(reference.target),
+        label: webPath(reference.label)
+      }))
+    })),
     theorems: payload.theorems.map((theorem) => ({
       ...theorem,
       uri: webPath(theorem.relativePath),

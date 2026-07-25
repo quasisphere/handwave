@@ -32,6 +32,8 @@ export interface LeanDeclaration {
   statement: string;
   leanStatement: string;
   leanProof?: string;
+  /** Names introduced by active `variable` commands outside this declaration. */
+  contextNames?: string[];
   range: RangeLike;
   nameRange: RangeLike;
   doc?: HandwaveDoc;

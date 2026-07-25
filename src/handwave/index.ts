@@ -15,6 +15,9 @@ export class HandwaveIndex {
   readonly backlinks = new Map<string, Backlink[]>();
   readonly workspaceRoots: string[];
   private readonly leanDependencyGraph: ReadonlyMap<string, string[]>;
+  private readonly leanDefinitionReferenceGraph: ReadonlyMap<string, string[]>;
+  private readonly leanDefinitionTheoremReferenceGraph: ReadonlyMap<string, string[]>;
+  private readonly leanTheoremDefinitionReferenceGraph: ReadonlyMap<string, string[]>;
   private readonly checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus>;
 
   constructor(
@@ -22,7 +25,9 @@ export class HandwaveIndex {
     declarations: LeanDeclaration[],
     articles: ArticleDocument[],
     checkStatuses: ReadonlyMap<string, LeanDeclarationCheckStatus> = new Map(),
-    artifactDependencyGraph: ReadonlyMap<string, string[]> = new Map()
+    artifactDependencyGraph: ReadonlyMap<string, string[]> = new Map(),
+    artifactDefinitionTheoremReferenceGraph: ReadonlyMap<string, string[]> = new Map(),
+    artifactTheoremDefinitionReferenceGraph: ReadonlyMap<string, string[]> = new Map()
   ) {
     this.workspaceRoots = (Array.isArray(workspaceRoots) ? workspaceRoots : [workspaceRoots]).filter(Boolean);
     const indexedDeclarations = declarations.filter(isIndexedLeanDeclaration);
@@ -31,16 +36,47 @@ export class HandwaveIndex {
     for (const declaration of indexedDeclarations) {
       this.leanDeclarations.set(declaration.name, declaration);
     }
-    const sourceDependencyGraph = collectLeanDependencyGraph(indexedDeclarations);
+    const sourceTheoremReferenceGraph = collectLeanTheoremReferenceGraph(indexedDeclarations);
     const indexedTheoremNames = new Set(
       indexedDeclarations.filter(isTheoremLikeDeclaration).map((declaration) => declaration.name)
     );
+    const indexedDefinitionNames = new Set(
+      indexedDeclarations.filter((declaration) => !isTheoremLikeDeclaration(declaration))
+        .map((declaration) => declaration.name)
+    );
+    const sourceDependencyGraph = new Map(
+      [...sourceTheoremReferenceGraph].filter(([name]) => indexedTheoremNames.has(name))
+    );
+    const sourceDefinitionTheoremReferenceGraph = new Map(
+      [...sourceTheoremReferenceGraph].filter(([name]) => indexedDefinitionNames.has(name))
+    );
+    const sourceTheoremDefinitionReferenceGraph =
+      collectLeanTheoremProofDefinitionReferenceGraph(indexedDeclarations);
     for (const [name, dependencies] of artifactDependencyGraph) {
       if (indexedTheoremNames.has(name)) {
         sourceDependencyGraph.set(name, dependencies.filter((dependency) => indexedTheoremNames.has(dependency)));
       }
     }
+    for (const [name, references] of artifactDefinitionTheoremReferenceGraph) {
+      if (indexedDefinitionNames.has(name)) {
+        sourceDefinitionTheoremReferenceGraph.set(
+          name,
+          references.filter((reference) => indexedTheoremNames.has(reference))
+        );
+      }
+    }
+    for (const [name, references] of artifactTheoremDefinitionReferenceGraph) {
+      if (indexedTheoremNames.has(name)) {
+        sourceTheoremDefinitionReferenceGraph.set(
+          name,
+          references.filter((reference) => indexedDefinitionNames.has(reference))
+        );
+      }
+    }
     this.leanDependencyGraph = sourceDependencyGraph;
+    this.leanDefinitionTheoremReferenceGraph = sourceDefinitionTheoremReferenceGraph;
+    this.leanTheoremDefinitionReferenceGraph = sourceTheoremDefinitionReferenceGraph;
+    this.leanDefinitionReferenceGraph = collectLeanDefinitionReferenceGraph(indexedDeclarations);
 
     for (const article of articles) {
       this.articles.set(article.uri, article);
@@ -115,6 +151,40 @@ export class HandwaveIndex {
       seen.add(dependency);
     }
     return dependencies;
+  }
+
+  statementDefinitionsForLean(name: string): string[] {
+    const declaration = this.leanDeclarations.get(name);
+    if (!declaration || !isTheoremLikeDeclaration(declaration)) {
+      return [];
+    }
+    return [...(this.leanDefinitionReferenceGraph.get(name) ?? [])];
+  }
+
+  proofDefinitionsForLean(name: string): string[] {
+    const declaration = this.leanDeclarations.get(name);
+    if (!declaration || !isTheoremLikeDeclaration(declaration)) {
+      return [];
+    }
+    const statementDefinitions = new Set(this.statementDefinitionsForLean(name));
+    return [...(this.leanTheoremDefinitionReferenceGraph.get(name) ?? [])]
+      .filter((definition) => !statementDefinitions.has(definition));
+  }
+
+  definitionReferencesForLean(name: string): string[] {
+    const declaration = this.leanDeclarations.get(name);
+    if (!declaration || isTheoremLikeDeclaration(declaration)) {
+      return [];
+    }
+    return [...(this.leanDefinitionReferenceGraph.get(name) ?? [])];
+  }
+
+  theoremReferencesForDefinition(name: string): string[] {
+    const declaration = this.leanDeclarations.get(name);
+    if (!declaration || isTheoremLikeDeclaration(declaration)) {
+      return [];
+    }
+    return [...(this.leanDefinitionTheoremReferenceGraph.get(name) ?? [])];
   }
 
   private resolveLean(target: ParsedTarget): ResolvedTarget | undefined {
@@ -212,7 +282,7 @@ export class HandwaveIndex {
 }
 
 export function isIndexedLeanDeclaration(declaration: LeanDeclaration): boolean {
-  return !isTheoremLikeDeclaration(declaration) || !hasHandwaveTag(declaration.doc, "shadow");
+  return !hasHandwaveTag(declaration.doc, "shadow");
 }
 
 export function canonicalTargetKey(target: ParsedTarget): string {
@@ -271,19 +341,21 @@ function articleKeys(uri: string, workspaceRoots: string[]): string[] {
   return Array.from(new Set(keys));
 }
 
-function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): Map<string, string[]> {
+function collectLeanTheoremReferenceGraph(
+  declarations: readonly LeanDeclaration[]
+): Map<string, string[]> {
   const theoremDeclarations = declarations.filter(isTheoremLikeDeclaration);
   const publicAliases = leanDependencyAliases(theoremDeclarations.filter((declaration) => !declaration.isPrivate));
   const privateAliasesByUri = leanPrivateDependencyAliasesByUri(theoremDeclarations);
   const graph = new Map<string, string[]>();
   const identifierPattern = /[A-Za-z_][A-Za-z0-9_'.]*/g;
 
-  for (const declaration of theoremDeclarations) {
+  for (const declaration of declarations) {
     const privateAliases = privateAliasesByUri.get(declaration.uri) ?? new Map();
     const dependencies: string[] = [];
     const seen = new Set<string>();
     const source = blankLeanCommentsAndStrings(declaration.statement);
-    const localNames = collectLeanLocalNames(source);
+    const localNames = collectLeanDeclarationLocalNames(declaration, source);
     for (const match of source.matchAll(identifierPattern)) {
       const dependency = resolveLeanDependencyIdentifier(match[0], privateAliases, publicAliases, localNames);
       if (!dependency || dependency === declaration.name || seen.has(dependency)) {
@@ -296,6 +368,132 @@ function collectLeanDependencyGraph(declarations: readonly LeanDeclaration[]): M
   }
 
   return graph;
+}
+
+function collectLeanDefinitionReferenceGraph(
+  declarations: readonly LeanDeclaration[]
+): Map<string, string[]> {
+  return collectLeanDefinitionReferences(
+    declarations,
+    () => true,
+    (declaration) =>
+      isTheoremLikeDeclaration(declaration) ? declaration.leanStatement : declaration.statement
+  );
+}
+
+function collectLeanTheoremProofDefinitionReferenceGraph(
+  declarations: readonly LeanDeclaration[]
+): Map<string, string[]> {
+  return collectLeanDefinitionReferences(
+    declarations,
+    isTheoremLikeDeclaration,
+    (declaration) => declaration.leanProof ?? "",
+    (declaration) => `${declaration.leanStatement}\n${declaration.leanProof ?? ""}`
+  );
+}
+
+function collectLeanDefinitionReferences(
+  declarations: readonly LeanDeclaration[],
+  includeDeclaration: (declaration: LeanDeclaration) => boolean,
+  referenceSource: (declaration: LeanDeclaration) => string,
+  localNameSource: (declaration: LeanDeclaration) => string = referenceSource
+): Map<string, string[]> {
+  const definitionDeclarations = declarations.filter((declaration) => !isTheoremLikeDeclaration(declaration));
+  const publicAliases = leanDependencyAliases(
+    definitionDeclarations.filter((declaration) => !declaration.isPrivate)
+  );
+  const privateAliasesByUri = leanPrivateDependencyAliasesByUri(definitionDeclarations);
+  const graph = new Map<string, string[]>();
+  const identifierPattern = /[\p{L}_][\p{L}\p{N}\p{M}_']*(?:\.[\p{L}_][\p{L}\p{N}\p{M}_']*)*/gu;
+
+  for (const declaration of declarations) {
+    if (!includeDeclaration(declaration)) {
+      continue;
+    }
+    const privateAliases = privateAliasesByUri.get(declaration.uri) ?? new Map();
+    const references: string[] = [];
+    const seen = new Set<string>();
+    const source = blankLeanCommentsAndStrings(referenceSource(declaration));
+    const localNames = collectLeanDeclarationLocalNames(
+      declaration,
+      blankLeanCommentsAndStrings(localNameSource(declaration))
+    );
+    for (const match of source.matchAll(identifierPattern)) {
+      const definition = resolveLeanStatementDefinitionIdentifier(
+        match[0],
+        declaration,
+        privateAliases,
+        publicAliases,
+        localNames
+      );
+      if (!definition || definition === declaration.name || seen.has(definition)) {
+        continue;
+      }
+      references.push(definition);
+      seen.add(definition);
+    }
+    graph.set(declaration.name, references);
+  }
+
+  return graph;
+}
+
+function resolveLeanStatementDefinitionIdentifier(
+  identifier: string,
+  declaration: LeanDeclaration,
+  privateAliases: ReadonlyMap<string, string>,
+  publicAliases: ReadonlyMap<string, string>,
+  localNames: ReadonlySet<string>
+): string | undefined {
+  const parts = identifier.split(".").filter(Boolean);
+  if (parts.length === 0 || (parts.length === 1 && localNames.has(parts[0]!))) {
+    return undefined;
+  }
+
+  if (parts.length >= 2 && localNames.has(parts[0]!)) {
+    for (let index = 1; index < parts.length; index++) {
+      const suffix = parts.slice(index).join(".");
+      const definition = resolveLeanIdentifierInNamespace(
+        suffix,
+        declaration.sourceName,
+        privateAliases,
+        publicAliases
+      );
+      if (definition) {
+        return definition;
+      }
+    }
+    return undefined;
+  }
+
+  const direct = resolveLeanIdentifierInNamespace(
+    identifier,
+    declaration.sourceName,
+    privateAliases,
+    publicAliases
+  );
+  if (direct) {
+    return direct;
+  }
+
+  return direct;
+}
+
+function resolveLeanIdentifierInNamespace(
+  identifier: string,
+  declarationSourceName: string,
+  privateAliases: ReadonlyMap<string, string>,
+  publicAliases: ReadonlyMap<string, string>
+): string | undefined {
+  const namespace = declarationSourceName.split(".").filter(Boolean).slice(0, -1);
+  for (let length = namespace.length; length > 0; length--) {
+    const candidate = [...namespace.slice(0, length), identifier].join(".");
+    const resolved = privateAliases.get(candidate) ?? publicAliases.get(candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+  return privateAliases.get(identifier) ?? publicAliases.get(identifier);
 }
 
 function resolveLeanDependencyIdentifier(
@@ -327,9 +525,9 @@ function resolveLeanDependencyIdentifier(
 
 function collectLeanLocalNames(source: string): Set<string> {
   const names = new Set<string>();
-  const identifierPattern = /[A-Za-z_][A-Za-z0-9_']*/g;
-  const binderPattern = /[({]\s*([A-Za-z_][A-Za-z0-9_']*(?:\s+[A-Za-z_][A-Za-z0-9_']*)*)\s*:/g;
-  const namedLocalPattern = /\b(?:have|let)\s+([A-Za-z_][A-Za-z0-9_']*)\b/g;
+  const identifierPattern = /[\p{L}_][\p{L}\p{N}\p{M}_']*/gu;
+  const binderPattern = /(?:\(|\{|\[)\s*([\p{L}_][\p{L}\p{N}\p{M}_']*(?:\s+[\p{L}_][\p{L}\p{N}\p{M}_']*)*)\s*:/gu;
+  const namedLocalPattern = /\b(?:have|let)\s+([\p{L}_][\p{L}\p{N}\p{M}_']*)\b/gu;
   const introPattern = /\bintro\s+([^\n;]*)/g;
   const rcasesPattern = /\brcases\b[^\n]*\bwith\b([^\n]*)/g;
 
@@ -349,6 +547,17 @@ function collectLeanLocalNames(source: string): Set<string> {
     addIdentifiers(names, match[1], identifierPattern);
   }
 
+  return names;
+}
+
+function collectLeanDeclarationLocalNames(
+  declaration: LeanDeclaration,
+  source: string
+): Set<string> {
+  const names = collectLeanLocalNames(source);
+  for (const name of declaration.contextNames ?? []) {
+    names.add(name);
+  }
   return names;
 }
 

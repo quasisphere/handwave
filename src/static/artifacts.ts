@@ -16,6 +16,8 @@ const leanArtifactCacheRelativePath = path.join(".lake", "handwave", "artifact-i
 export interface StaticLeanArtifactMetadata {
   declarations: LeanDeclaration[];
   dependencyGraph: Map<string, string[]>;
+  definitionTheoremReferenceGraph: Map<string, string[]>;
+  theoremDefinitionReferenceGraph: Map<string, string[]>;
   statuses: Map<string, LeanDeclarationCheckStatus>;
 }
 
@@ -23,7 +25,7 @@ export async function loadStaticLeanArtifactMetadata(
   root: string,
   declarations: readonly LeanDeclaration[]
 ): Promise<StaticLeanArtifactMetadata> {
-  const artifacts = await loadFreshIleanArtifacts(root, declarations);
+  const { artifacts, sourceNewerUris } = await loadAvailableIleanArtifacts(root, declarations);
   const metadata = applyLeanIleanArtifacts(declarations, artifacts);
   const cache = await readLeanArtifactCache(root);
   const statuses = collectLeanSourceCheckStatuses(metadata.declarations);
@@ -54,14 +56,19 @@ export async function loadStaticLeanArtifactMetadata(
     }
     const hasSorry = entry.axioms.includes("sorryAx");
     const directSorry = entry.valueConstants.includes("sorryAx");
+    const stale = sourceNewerUris.has(declaration.uri);
+    const artifactReason = hasSorry
+      ? "Lean's cached build artifacts report a transitive dependency on sorryAx."
+      : "Lean's cached build artifacts report no transitive dependency on sorryAx.";
     statuses.set(declaration.name, {
       checked: !hasSorry,
       ownChecked: !directSorry,
       dependencies: entry.axioms,
       failedDependencies: hasSorry ? ["sorryAx"] : [],
-      reason: hasSorry
-        ? "Lean's cached build artifacts report a transitive dependency on sorryAx."
-        : "Lean's cached build artifacts report no transitive dependency on sorryAx."
+      stale,
+      reason: stale
+        ? `${artifactReason} The source is newer than the available Lean artifact.`
+        : artifactReason
     });
   }
 
@@ -114,11 +121,17 @@ function fillSourceSnapshotStatuses(
   }
 }
 
-async function loadFreshIleanArtifacts(
+interface AvailableLeanIleanArtifacts {
+  artifacts: LeanIleanArtifact[];
+  sourceNewerUris: Set<string>;
+}
+
+async function loadAvailableIleanArtifacts(
   root: string,
   declarations: readonly LeanDeclaration[]
-): Promise<LeanIleanArtifact[]> {
+): Promise<AvailableLeanIleanArtifacts> {
   const artifacts: LeanIleanArtifact[] = [];
+  const sourceNewerUris = new Set<string>();
   const uris = [...new Set(declarations.map((declaration) => declaration.uri))].sort();
   for (const uri of uris) {
     const artifactBase = leanCompiledArtifactBasePath(uri, root);
@@ -131,14 +144,15 @@ async function loadFreshIleanArtifacts(
         fs.stat(`${artifactBase}.ilean`),
         fs.readFile(`${artifactBase}.ilean`, "utf8")
       ]);
-      if (ileanStat.mtimeMs + 1 >= sourceStat.mtimeMs) {
-        artifacts.push({ uri, contents });
+      artifacts.push({ uri, contents });
+      if (ileanStat.mtimeMs + 1 < sourceStat.mtimeMs) {
+        sourceNewerUris.add(uri);
       }
     } catch {
-      // Missing or stale compiled artifacts leave the source-only graph in use.
+      // A missing or unreadable `.ilean` leaves the source-only graph in use.
     }
   }
-  return artifacts;
+  return { artifacts, sourceNewerUris };
 }
 
 async function readLeanArtifactCache(root: string) {

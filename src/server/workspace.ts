@@ -86,6 +86,8 @@ export class HandwaveLiveWorkspace {
   private articles: ArticleSource[] = [];
   private statuses = new Map<string, LeanDeclarationCheckStatus>();
   private dependencyGraph = new Map<string, string[]>();
+  private definitionTheoremReferenceGraph = new Map<string, string[]>();
+  private theoremDefinitionReferenceGraph = new Map<string, string[]>();
   private declarationFileRevisions = new Map<string, string>();
   private indexValue: HandwaveIndex;
   private payloadValue: TheoremExplorerPayload;
@@ -117,6 +119,8 @@ export class HandwaveLiveWorkspace {
     this.declarations = artifactMetadata.declarations.filter(isIndexedLeanDeclaration);
     this.statuses = artifactMetadata.statuses;
     this.dependencyGraph = artifactMetadata.dependencyGraph;
+    this.definitionTheoremReferenceGraph = artifactMetadata.definitionTheoremReferenceGraph;
+    this.theoremDefinitionReferenceGraph = artifactMetadata.theoremDefinitionReferenceGraph;
     this.articles = [];
     for (const file of articleFiles) {
       this.articles.push(await readArticleSource(this.root, file));
@@ -207,6 +211,7 @@ export class HandwaveLiveWorkspace {
       await atomicWriteFile(declaration.uri, updatedSource);
     }
     this.replaceLeanFile(declaration.uri, updatedSource);
+    await this.refreshArtifacts();
     const updatedDeclaration = this.declarations.find((item) =>
       item.uri === declaration.uri && item.sourceName === declaration.sourceName
     );
@@ -231,6 +236,7 @@ export class HandwaveLiveWorkspace {
       await atomicWriteFile(declaration.uri, updatedSource);
     }
     this.replaceLeanFile(declaration.uri, updatedSource);
+    await this.refreshArtifacts();
     const updated = this.declarations.find((item) =>
       item.uri === declaration.uri && item.sourceName === declaration.sourceName
     );
@@ -250,6 +256,7 @@ export class HandwaveLiveWorkspace {
           return false;
         }
         this.replaceLeanFile(resolved, source);
+        await this.refreshArtifacts();
         return true;
       }
       const current = this.articles.find((article) => article.uri === resolved);
@@ -263,6 +270,26 @@ export class HandwaveLiveWorkspace {
       await this.initialize();
       return true;
     }
+  }
+
+  async refreshArtifacts(): Promise<boolean> {
+    const previousPayload = JSON.stringify(this.payloadValue);
+    const sourceDeclarations = this.declarations.map((declaration) => {
+      const {
+        artifactName: _artifactName,
+        artifactModule: _artifactModule,
+        ...sourceDeclaration
+      } = declaration;
+      return sourceDeclaration;
+    });
+    const artifactMetadata = await loadStaticLeanArtifactMetadata(this.root, sourceDeclarations);
+    this.declarations = artifactMetadata.declarations.filter(isIndexedLeanDeclaration);
+    this.statuses = artifactMetadata.statuses;
+    this.dependencyGraph = artifactMetadata.dependencyGraph;
+    this.definitionTheoremReferenceGraph = artifactMetadata.definitionTheoremReferenceGraph;
+    this.theoremDefinitionReferenceGraph = artifactMetadata.theoremDefinitionReferenceGraph;
+    this.rebuildIndex();
+    return JSON.stringify(this.payloadValue) !== previousPayload;
   }
 
   private articleSource(target: string): ArticleSource | undefined {
@@ -335,7 +362,9 @@ export class HandwaveLiveWorkspace {
       this.declarations,
       this.articles.map((article) => article.document),
       this.statuses,
-      this.dependencyGraph
+      this.dependencyGraph,
+      this.definitionTheoremReferenceGraph,
+      this.theoremDefinitionReferenceGraph
     );
     this.payloadValue = sanitizePayload(
       buildTheoremExplorerPayload(this.indexValue, this.declarations, [this.root])
@@ -388,6 +417,11 @@ function replaceArticle(articles: ArticleSource[], updated: ArticleSource): Arti
 function sanitizePayload(payload: TheoremExplorerPayload): TheoremExplorerPayload {
   return {
     ...payload,
+    definitions: payload.definitions.map((definition) => ({
+      ...definition,
+      uri: webPath(definition.relativePath),
+      relativePath: webPath(definition.relativePath)
+    })),
     theorems: payload.theorems.map((theorem) => ({
       ...theorem,
       uri: webPath(theorem.relativePath),

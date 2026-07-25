@@ -173,6 +173,8 @@ class HandwaveController
   private compiledLeanArtifactsSnapshot: string | undefined;
   private readonly managedSourceWrites = new Map<string, number>();
   private leanArtifactDependencyGraph = new Map<string, string[]>();
+  private leanArtifactDefinitionTheoremReferenceGraph = new Map<string, string[]>();
+  private leanArtifactTheoremDefinitionReferenceGraph = new Map<string, string[]>();
   private managedLeanArtifactRefreshUntil = 0;
   private nextPreviewKey = 1;
 
@@ -559,6 +561,10 @@ class HandwaveController
       this.declarations = declarations;
       this.articles = articles;
       this.leanArtifactDependencyGraph = artifactMetadata.dependencyGraph;
+      this.leanArtifactDefinitionTheoremReferenceGraph =
+        artifactMetadata.definitionTheoremReferenceGraph;
+      this.leanArtifactTheoremDefinitionReferenceGraph =
+        artifactMetadata.theoremDefinitionReferenceGraph;
       this.pruneLeanAxiomChecks(declarations);
       await this.hydrateLeanArtifactCache(declarations, workspaceFolders);
       if (rebuildGeneration !== this.indexGeneration) {
@@ -572,7 +578,9 @@ class HandwaveController
         declarations,
         articles,
         this.currentLeanCheckStatuses(declarations),
-        this.leanArtifactDependencyGraph
+        this.leanArtifactDependencyGraph,
+        this.leanArtifactDefinitionTheoremReferenceGraph,
+        this.leanArtifactTheoremDefinitionReferenceGraph
       );
 
       if (config.get<boolean>("enableDiagnostics", true)) {
@@ -654,6 +662,8 @@ class HandwaveController
       } else {
         for (const declaration of previousDeclarations) {
           this.leanArtifactDependencyGraph.delete(declaration.name);
+          this.leanArtifactDefinitionTheoremReferenceGraph.delete(declaration.name);
+          this.leanArtifactTheoremDefinitionReferenceGraph.delete(declaration.name);
         }
       }
       this.declarations = [
@@ -817,12 +827,22 @@ class HandwaveController
     // Lake has just validated these artifacts by content hash, so mtimes are
     // irrelevant (for example after touching an otherwise unchanged source).
     const metadata = await loadLeanArtifactMetadata(this.declarations, workspaceFolders, false);
-    const dependencyGraphChanged = !stringArrayMapsEqual(
-      this.leanArtifactDependencyGraph,
-      metadata.dependencyGraph
-    );
+    const dependencyGraphChanged =
+      !stringArrayMapsEqual(this.leanArtifactDependencyGraph, metadata.dependencyGraph) ||
+      !stringArrayMapsEqual(
+        this.leanArtifactDefinitionTheoremReferenceGraph,
+        metadata.definitionTheoremReferenceGraph
+      ) ||
+      !stringArrayMapsEqual(
+        this.leanArtifactTheoremDefinitionReferenceGraph,
+        metadata.theoremDefinitionReferenceGraph
+      );
     this.declarations = metadata.declarations;
     this.leanArtifactDependencyGraph = metadata.dependencyGraph;
+    this.leanArtifactDefinitionTheoremReferenceGraph =
+      metadata.definitionTheoremReferenceGraph;
+    this.leanArtifactTheoremDefinitionReferenceGraph =
+      metadata.theoremDefinitionReferenceGraph;
     this.rebuildCachedIndex(workspaceFolders, dependencyGraphChanged);
   }
 
@@ -864,7 +884,9 @@ class HandwaveController
       this.declarations,
       this.articles,
       this.currentLeanCheckStatuses(this.declarations),
-      this.leanArtifactDependencyGraph
+      this.leanArtifactDependencyGraph,
+      this.leanArtifactDefinitionTheoremReferenceGraph,
+      this.leanArtifactTheoremDefinitionReferenceGraph
     );
     if (refreshTheoremExplorer) {
       this.refreshTheoremExplorer();
@@ -882,7 +904,7 @@ class HandwaveController
 
   private theoremExplorerPreview(name: string): string | undefined {
     const declaration = this.index.leanDeclarations.get(name);
-    if (!declaration || !isTheoremLikeDeclaration(declaration)) {
+    if (!declaration) {
       return undefined;
     }
     return renderLeanDeclarationPreviewHtml(

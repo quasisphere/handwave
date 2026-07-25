@@ -8,8 +8,10 @@ export type TheoremExplorerStatusCategory = "green" | "yellow" | "red" | "unknow
 export interface TheoremExplorerPayload {
   generatedAt: number;
   theoremCount: number;
+  definitionCount: number;
   milestoneCount: number;
   theorems: TheoremExplorerItem[];
+  definitions: DefinitionExplorerItem[];
 }
 
 export interface TheoremExplorerItem {
@@ -26,10 +28,30 @@ export interface TheoremExplorerItem {
   milestone: boolean;
   isPrivate: boolean;
   dependencies: string[];
+  definitions: TheoremExplorerLink[];
   dependents: TheoremExplorerLink[];
+  referencingDefinitions: TheoremExplorerLink[];
   references: TheoremExplorerLink[];
   statusCategory: TheoremExplorerStatusCategory;
   statusHtml: string;
+}
+
+export interface DefinitionExplorerItem {
+  name: string;
+  sourceName: string;
+  shortName: string;
+  displayName: string;
+  displayNameHasMath: boolean;
+  moduleName: string;
+  uri: string;
+  relativePath: string;
+  target: string;
+  isPrivate: boolean;
+  definitions: TheoremExplorerLink[];
+  theorems: TheoremExplorerLink[];
+  referencingDefinitions: TheoremExplorerLink[];
+  referencingTheorems: TheoremExplorerLink[];
+  references: TheoremExplorerLink[];
 }
 
 export interface TheoremExplorerStatusUpdate {
@@ -42,6 +64,7 @@ export interface TheoremExplorerLink {
   target: string;
   label: string;
   detail?: string;
+  proofOnly?: boolean;
 }
 
 export function buildTheoremExplorerPayload(
@@ -54,14 +77,23 @@ export function buildTheoremExplorerPayload(
     .filter(isTheoremLikeDeclaration)
     .map((declaration) => theoremExplorerItem(index, declaration, workspaceRoots))
     .sort(compareTheoremExplorerItems);
+  const definitions = declarations
+    .filter(isIndexedLeanDeclaration)
+    .filter((declaration) => !isTheoremLikeDeclaration(declaration))
+    .map((declaration) => definitionExplorerItem(index, declaration, workspaceRoots))
+    .sort(compareDefinitionExplorerItems);
   addDependentLinks(theorems);
+  addDefinitionReferenceLinks(theorems, definitions);
   const publicTheorems = theorems.filter((item) => !item.isPrivate);
+  const publicDefinitions = definitions.filter((item) => !item.isPrivate);
 
   return {
     generatedAt: Date.now(),
     theoremCount: publicTheorems.length,
+    definitionCount: publicDefinitions.length,
     milestoneCount: publicTheorems.filter((item) => item.milestone).length,
-    theorems
+    theorems,
+    definitions
   };
 }
 
@@ -73,6 +105,13 @@ function theoremExplorerItem(
   const displayName = declaration.doc?.fields.name?.trim() || shortLeanName(declaration.sourceName);
   const moduleName = leanModuleName(declaration.sourceName);
   const status = index.checkStatusForLean(declaration.name);
+  const statementDefinitions = index.statementDefinitionsForLean(declaration.name)
+    .map((name) => declarationExplorerLink(index.leanDeclarations.get(name)))
+    .filter((link): link is TheoremExplorerLink => Boolean(link));
+  const proofDefinitions = index.proofDefinitionsForLean(declaration.name)
+    .map((name) => declarationExplorerLink(index.leanDeclarations.get(name)))
+    .filter((link): link is TheoremExplorerLink => Boolean(link))
+    .map((link) => ({ ...link, proofOnly: true }));
   return {
     name: declaration.name,
     sourceName: declaration.sourceName,
@@ -87,10 +126,41 @@ function theoremExplorerItem(
     milestone: Boolean(declaration.doc?.tags.includes("milestone")),
     isPrivate: declaration.isPrivate,
     dependencies: index.dependenciesForLean(declaration.name),
+    definitions: [...statementDefinitions, ...proofDefinitions],
     dependents: [],
+    referencingDefinitions: [],
     references: articleReferencesForLean(index, declaration.name, workspaceRoots),
     statusCategory: theoremExplorerStatusCategory(status),
     statusHtml: renderCheckStatus(status)
+  };
+}
+
+function definitionExplorerItem(
+  index: HandwaveIndex,
+  declaration: LeanDeclaration,
+  workspaceRoots: readonly string[]
+): DefinitionExplorerItem {
+  const displayName = declaration.doc?.fields.name?.trim() || shortLeanName(declaration.sourceName);
+  return {
+    name: declaration.name,
+    sourceName: declaration.sourceName,
+    shortName: shortLeanName(declaration.sourceName),
+    displayName,
+    displayNameHasMath: containsMathDelimiter(displayName),
+    moduleName: leanModuleName(declaration.sourceName),
+    uri: declaration.uri,
+    relativePath: relativeWorkspacePath(declaration.uri, workspaceRoots),
+    target: `lean:${declaration.name}`,
+    isPrivate: declaration.isPrivate,
+    definitions: index.definitionReferencesForLean(declaration.name)
+      .map((name) => declarationExplorerLink(index.leanDeclarations.get(name)))
+      .filter((link): link is TheoremExplorerLink => Boolean(link)),
+    theorems: index.theoremReferencesForDefinition(declaration.name)
+      .map((name) => declarationExplorerLink(index.leanDeclarations.get(name)))
+      .filter((link): link is TheoremExplorerLink => Boolean(link)),
+    referencingDefinitions: [],
+    referencingTheorems: [],
+    references: articleReferencesForLean(index, declaration.name, workspaceRoots)
   };
 }
 
@@ -143,6 +213,94 @@ function theoremExplorerLink(theorem: TheoremExplorerItem): TheoremExplorerLink 
   };
 }
 
+function definitionExplorerLink(definition: DefinitionExplorerItem): TheoremExplorerLink {
+  return {
+    target: definition.target,
+    label: definition.displayName,
+    detail: definition.moduleName || definition.relativePath
+  };
+}
+
+function declarationExplorerLink(
+  declaration: LeanDeclaration | undefined
+): TheoremExplorerLink | undefined {
+  if (!declaration) {
+    return undefined;
+  }
+  const displayName = declaration.doc?.fields.name?.trim() || shortLeanName(declaration.sourceName);
+  return {
+    target: `lean:${declaration.name}`,
+    label: displayName,
+    detail: declaration.sourceName
+  };
+}
+
+function addDefinitionReferenceLinks(
+  theorems: readonly TheoremExplorerItem[],
+  definitions: readonly DefinitionExplorerItem[]
+): void {
+  const definitionsByName = new Map(definitions.map((definition) => [definition.name, definition]));
+  const theoremsByName = new Map(theorems.map((theorem) => [theorem.name, theorem]));
+  for (const theorem of theorems) {
+    for (const reference of theorem.definitions) {
+      const definitionName = leanNameFromTarget(reference.target);
+      const definition = definitionName ? definitionsByName.get(definitionName) : undefined;
+      if (definition) {
+        const link = theoremExplorerLink(theorem);
+        addExplorerLink(
+          definition.referencingTheorems,
+          reference.proofOnly ? { ...link, proofOnly: true } : link
+        );
+      }
+    }
+  }
+  for (const referencingDefinition of definitions) {
+    for (const reference of referencingDefinition.definitions) {
+      const definitionName = leanNameFromTarget(reference.target);
+      const definition = definitionName ? definitionsByName.get(definitionName) : undefined;
+      if (definition && definition.name !== referencingDefinition.name) {
+        addExplorerLink(
+          definition.referencingDefinitions,
+          definitionExplorerLink(referencingDefinition)
+        );
+      }
+    }
+    for (const reference of referencingDefinition.theorems) {
+      const theoremName = leanNameFromTarget(reference.target);
+      const theorem = theoremName ? theoremsByName.get(theoremName) : undefined;
+      if (theorem) {
+        addExplorerLink(
+          theorem.referencingDefinitions,
+          definitionExplorerLink(referencingDefinition)
+        );
+      }
+    }
+  }
+  for (const theorem of theorems) {
+    theorem.referencingDefinitions.sort(compareTheoremExplorerLinks);
+  }
+  for (const definition of definitions) {
+    definition.referencingDefinitions.sort(compareTheoremExplorerLinks);
+    definition.referencingTheorems.sort(compareTheoremExplorerLinks);
+  }
+}
+
+function addExplorerLink(
+  links: TheoremExplorerLink[],
+  link: TheoremExplorerLink
+): void {
+  const existingIndex = links.findIndex((candidate) => candidate.target === link.target);
+  if (existingIndex < 0) {
+    links.push(link);
+  } else if (links[existingIndex]?.proofOnly && !link.proofOnly) {
+    links[existingIndex] = link;
+  }
+}
+
+function leanNameFromTarget(target: string): string | undefined {
+  return target.startsWith("lean:") ? target.slice("lean:".length) || undefined : undefined;
+}
+
 function articleReferencesForLean(
   index: HandwaveIndex,
   name: string,
@@ -162,12 +320,22 @@ function articleReferencesForLean(
 }
 
 function compareTheoremExplorerLinks(first: TheoremExplorerLink, second: TheoremExplorerLink): number {
-  return first.label.localeCompare(second.label) ||
+  return Number(Boolean(first.proofOnly)) - Number(Boolean(second.proofOnly)) ||
+    first.label.localeCompare(second.label) ||
     (first.detail ?? "").localeCompare(second.detail ?? "") ||
     first.target.localeCompare(second.target);
 }
 
 function compareTheoremExplorerItems(first: TheoremExplorerItem, second: TheoremExplorerItem): number {
+  return first.moduleName.localeCompare(second.moduleName) ||
+    first.shortName.localeCompare(second.shortName) ||
+    first.sourceName.localeCompare(second.sourceName);
+}
+
+function compareDefinitionExplorerItems(
+  first: DefinitionExplorerItem,
+  second: DefinitionExplorerItem
+): number {
   return first.moduleName.localeCompare(second.moduleName) ||
     first.shortName.localeCompare(second.shortName) ||
     first.sourceName.localeCompare(second.sourceName);

@@ -29,7 +29,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
   declarationPattern.lastIndex = 0;
   const matches = [...searchableText.matchAll(declarationPattern)];
   const declarationOffsets = matches.map((match) => match.index ?? 0);
-  const namespaces = namespacesAtOffsets(searchableText, declarationOffsets);
+  const contexts = leanContextsAtOffsets(searchableText, declarationOffsets);
   const scopeEndOffsets = collectScopeEndOffsets(searchableText);
   const topLevelDocOffsets = [...text.matchAll(/^\/--/gm)].map((match) => {
     const offset = match.index ?? 0;
@@ -69,7 +69,8 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
     const declStart = declarationOffsets[index];
     const isPrivate = isPrivateLeanDeclarationAt(text, declStart);
     const nameStart = declStart + match[0].lastIndexOf(match[2]);
-    const namespace = namespaces.get(declStart) ?? [];
+    const context = contexts.get(declStart);
+    const namespace = context?.namespace ?? [];
     const localName = stripLeanEscapes(match[2]);
     const sourceName = namespace.length > 0 ? `${namespace.join(".")}.${localName}` : localName;
     const name = declarationIndexName(uri, sourceName, isPrivate, declStart);
@@ -91,6 +92,7 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
       statement: declarationText,
       leanStatement: parts.leanStatement,
       leanProof: parts.leanProof,
+      contextNames: context?.localNames ?? [],
       range: rangeFromOffsets(text, declStart, statementEnd),
       nameRange: rangeFromOffsets(text, nameStart, nameStart + match[2].length),
       doc,
@@ -245,36 +247,79 @@ export function normalizeHandwaveTag(value: string): string | undefined {
   return tag;
 }
 
-function namespacesAtOffsets(searchableText: string, offsets: readonly number[]): Map<number, string[]> {
-  type ScopeEntry =
-    | { kind: "namespace"; name: string }
-    | { kind: "section"; name?: string };
-  const result = new Map<number, string[]>();
-  const stack: ScopeEntry[] = [];
+type LeanScopeEntry =
+  | { kind: "namespace"; name: string; localNames: Set<string> }
+  | { kind: "section"; name?: string; localNames: Set<string> };
+
+function leanContextsAtOffsets(
+  searchableText: string,
+  offsets: readonly number[]
+): Map<number, { namespace: string[]; localNames: string[] }> {
+  const result = new Map<number, { namespace: string[]; localNames: string[] }>();
+  const stack: LeanScopeEntry[] = [];
+  const rootLocalNames = new Set<string>();
   const namespacePattern = new RegExp(
     `^\\s*(?:(namespace)[ \\t]+(${leanQualifiedIdentifierSource}(?:[ \\t]+${leanQualifiedIdentifierSource})*)|` +
       `(section)(?:[ \\t]+(${leanQualifiedIdentifierSource}))?|` +
       `end(?:[ \\t]+(${leanQualifiedIdentifierSource}))?)(?=\\s|$)`,
     "gmu"
   );
-  const events = [...searchableText.matchAll(namespacePattern)];
+  const variablePattern = /^[ \t]*variable\b[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*/gmu;
+  const events = [
+    ...[...searchableText.matchAll(namespacePattern)].map((match) => ({
+      kind: "scope" as const,
+      index: match.index ?? 0,
+      match
+    })),
+    ...[...searchableText.matchAll(variablePattern)].map((match) => ({
+      kind: "variable" as const,
+      index: match.index ?? 0,
+      match
+    }))
+  ].sort((first, second) => first.index - second.index);
   let eventIndex = 0;
 
   for (const offset of offsets) {
-    while (eventIndex < events.length && (events[eventIndex].index ?? 0) < offset) {
-      updateLeanScope(stack, events[eventIndex]);
+    while (eventIndex < events.length && events[eventIndex].index < offset) {
+      const event = events[eventIndex];
+      if (event.kind === "scope") {
+        updateLeanScope(stack, event.match);
+      } else {
+        const target = stack.at(-1)?.localNames ?? rootLocalNames;
+        for (const name of collectLeanVariableNames(event.match[0])) {
+          target.add(name);
+        }
+      }
       eventIndex++;
     }
     result.set(
       offset,
-      stack.flatMap((entry) => entry.kind === "namespace" ? [entry.name] : [])
+      {
+        namespace: stack.flatMap((entry) => entry.kind === "namespace" ? [entry.name] : []),
+        localNames: [
+          ...rootLocalNames,
+          ...stack.flatMap((entry) => [...entry.localNames])
+        ]
+      }
     );
   }
   return result;
 }
 
+function collectLeanVariableNames(source: string): string[] {
+  const names: string[] = [];
+  const binderPattern = new RegExp(
+    `(?:\\(|\\{|\\[)\\s*(${leanIdentifierSource}(?:\\s+${leanIdentifierSource})*)\\s*:`,
+    "gu"
+  );
+  for (const match of source.matchAll(binderPattern)) {
+    names.push(...match[1].trim().split(/\s+/).filter(Boolean));
+  }
+  return names;
+}
+
 function updateLeanScope(
-  stack: Array<{ kind: "namespace"; name: string } | { kind: "section"; name?: string }>,
+  stack: LeanScopeEntry[],
   match: RegExpMatchArray
 ): void {
   if (match[1]) {
@@ -284,12 +329,14 @@ function updateLeanScope(
         .split(/\s+/)
         .flatMap((part) => part.split("."))
         .filter(Boolean)
-        .map((name) => ({ kind: "namespace" as const, name }))
+        .map((name) => ({ kind: "namespace" as const, name, localNames: new Set<string>() }))
     );
     return;
   }
   if (match[3]) {
-    stack.push(match[4] ? { kind: "section", name: match[4] } : { kind: "section" });
+    stack.push(match[4]
+      ? { kind: "section", name: match[4], localNames: new Set<string>() }
+      : { kind: "section", localNames: new Set<string>() });
     return;
   }
 
@@ -307,7 +354,7 @@ function updateLeanScope(
   const namespaceEntries = stack
     .map((entry, index) => ({ entry, index }))
     .filter(({ entry }) => entry.kind === "namespace") as Array<{
-      entry: { kind: "namespace"; name: string };
+      entry: { kind: "namespace"; name: string; localNames: Set<string> };
       index: number;
     }>;
   const suffixStart = namespaceEntries.length - parts.length;

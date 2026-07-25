@@ -59,7 +59,8 @@ export function renderLiveServerHtml(html: string, mutationToken: string): strin
               type: "setArticle",
               target: message.target,
               html: data.html,
-              recordHistory: message.recordHistory !== false
+              recordHistory: message.recordHistory !== false,
+              preserveScroll: message.preserveScroll === true
             });
           }
           return;

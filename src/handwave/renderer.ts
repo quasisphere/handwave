@@ -25,6 +25,7 @@ interface DeclarationRenderOptions {
   popovers?: boolean;
   milestoneControls?: boolean;
   dependencyTree?: boolean;
+  definitionReferences?: boolean;
   sourceLinks?: boolean;
   editableTags?: boolean;
   editableMetadata?: boolean;
@@ -141,7 +142,10 @@ export function renderLeanDeclarationPreviewHtml(
   index: HandwaveIndex,
   commandHref: (target: string) => string,
   editorHref: (target: string) => string,
-  options: Pick<DeclarationRenderOptions, "sourceLinks" | "editableMetadata"> = {}
+  options: Pick<
+    DeclarationRenderOptions,
+    "sourceLinks" | "editableMetadata" | "definitionReferences"
+  > = {}
 ): string {
   return renderDeclarationPackage(
     declaration,
@@ -151,6 +155,7 @@ export function renderLeanDeclarationPreviewHtml(
     index,
     {
       dependencyTree: false,
+      definitionReferences: false,
       milestoneControls: false,
       sourceLinks: options.sourceLinks,
       editableMetadata: options.editableMetadata
@@ -206,8 +211,7 @@ function renderHtmlShell(
     h1 { margin-top: 0; }
     a {
       color: var(--vscode-textLink-foreground, var(--accent));
-      text-decoration-thickness: 1px;
-      text-underline-offset: 3px;
+      text-decoration: none;
     }
     .declaration-link {
       color: inherit;
@@ -215,7 +219,6 @@ function renderHtmlShell(
     }
     .declaration-link:hover {
       color: var(--vscode-textLink-foreground, var(--accent));
-      text-decoration: underline;
     }
     code, pre {
       font-family: var(--vscode-editor-font-family);
@@ -378,6 +381,32 @@ function renderHtmlShell(
       min-width: 18em;
       overflow: auto;
       padding-top: 6px;
+    }
+    .definition-references {
+      border-top: 1px solid var(--border);
+      display: block;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.9em;
+      margin-top: 6px;
+      min-width: 18em;
+      padding-top: 6px;
+    }
+    .definition-references-title {
+      color: var(--muted);
+      display: block;
+      font-family: var(--vscode-font-family, ui-sans-serif, system-ui, sans-serif);
+      font-size: 0.85em;
+      font-variant-caps: all-small-caps;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+    }
+    .definition-reference-list {
+      display: grid;
+      gap: 4px;
+    }
+    .definition-reference-item {
+      display: block;
     }
     .dependency-tree-list {
       display: block;
@@ -1088,6 +1117,9 @@ function renderTheoremView(
   const dependencyTree = options.dependencyTree === false
     ? ""
     : renderDependencyTree(declaration.name, index, commandHref);
+  const definitionReferences = options.definitionReferences === false
+    ? ""
+    : renderStatementDefinitionReferences(declaration.name, index, commandHref);
   const milestoneControl = options.milestoneControls === false
     ? ""
     : renderMilestoneTagControl(declaration, target, options.editableTags !== false);
@@ -1097,7 +1129,7 @@ function renderTheoremView(
     <section class="theorem-view" id="${escapeHtml(leanDeclarationAnchorId(declaration.name))}" data-target="${escapeHtml(target)}">
       ${metadataControl}
       <div class="theorem-statement" data-section="statement" data-mode="text">
-        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", dependencyTree, declaration.sourceName, milestoneControl, options)}`, proseStatement, commandHref)}
+        ${renderLabeledProseParagraphs("theorem-line", `${renderCheckStatus(status)}${renderDeclarationLabel(label, target, commandHref, editorHref, "Theorem view", `${dependencyTree}${definitionReferences}`, declaration.sourceName, milestoneControl, options)}`, proseStatement, commandHref)}
         ${renderLeanBlock(declaration.leanStatement)}
       </div>
       <div class="proof-section" data-section="proof" data-mode="text">
@@ -1274,6 +1306,24 @@ function renderDependencyTree(
   }
 
   return `<span class="dependency-tree" role="tree" aria-label="Dependency tree">${renderDependencyList(nodes, commandHref, index)}</span>`;
+}
+
+function renderStatementDefinitionReferences(
+  name: string,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string
+): string {
+  const items = index.statementDefinitionsForLean(name).map((definitionName) => {
+    const target = `lean:${definitionName}`;
+    const href = escapeHtml(commandHref(target));
+    const escapedTarget = escapeHtml(target);
+    const label = renderTypographicText(dependencyDisplayName(definitionName, index));
+    return `<span class="definition-reference-item"><a class="definition-reference-link" href="${href}" data-handwave-target="${escapedTarget}" title="Open ${escapedTarget}">${label}</a></span>`;
+  });
+  if (items.length === 0) {
+    return "";
+  }
+  return `<span class="definition-references" role="group" aria-label="Definitions referenced in theorem statement"><span class="definition-references-title">Definitions</span><span class="definition-reference-list">${items.join("")}</span></span>`;
 }
 
 function dependencyTreeNodes(

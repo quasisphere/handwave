@@ -8,6 +8,8 @@ export interface TheoremExplorerRenderOptions {
   milestoneControls?: boolean;
   localNavigation?: boolean;
   applicationShell?: boolean;
+  staticDataUrl?: string;
+  staticDataBase64?: string;
 }
 
 export interface TheoremExplorerArticleItem {
@@ -20,13 +22,30 @@ export function renderTheoremExplorerHtml(
   payload: TheoremExplorerPayload,
   options: TheoremExplorerRenderOptions = {}
 ): string {
-  const previewHtmlMap = options.previewHtmlByName
+  const hasStaticData = Boolean(options.staticDataUrl || options.staticDataBase64);
+  const previewHtmlMap = options.previewHtmlByName && !hasStaticData
     ? `new Map(${jsonForScript([...options.previewHtmlByName])})`
     : "new Map()";
-  const articleHtmlMap = options.articleHtmlByTarget
+  const articleHtmlMap = options.articleHtmlByTarget && !hasStaticData
     ? `new Map(${jsonForScript([...options.articleHtmlByTarget])})`
     : "new Map()";
-  const articleItems = jsonForScript(options.articleItems ?? []);
+  const articleItems = jsonForScript(hasStaticData ? [] : options.articleItems ?? []);
+  const initialPayload = hasStaticData
+    ? {
+      generatedAt: 0,
+      theoremCount: 0,
+      definitionCount: 0,
+      milestoneCount: 0,
+      theorems: [],
+      definitions: []
+    }
+    : payload;
+  const staticDataUrl = options.staticDataUrl
+    ? jsonForScript(options.staticDataUrl)
+    : "undefined";
+  const staticDataBase64 = options.staticDataBase64
+    ? jsonForScript(options.staticDataBase64)
+    : "undefined";
   const applicationShell = options.applicationShell === true;
   const previewHtmlWithMilestoneControl = options.milestoneControls === false
     ? "previewHtml"
@@ -115,6 +134,19 @@ export function renderTheoremExplorerHtml(
       <p class="preview-empty">Select a theorem or definition.</p>
     </section>
   </main>`;
+  const staticLoadingOverlay = hasStaticData
+    ? `<div id="static-loading" class="static-loading" role="status" aria-live="polite">
+    <div class="static-loading-card">
+      <h1>Loading Handwave</h1>
+      <p id="static-loading-message">${options.staticDataBase64
+        ? "Preparing embedded theorem data…"
+        : "Downloading theorem data…"}</p>
+      <progress id="static-loading-progress"></progress>
+      <p id="static-loading-detail" class="static-loading-detail"></p>
+      <button id="static-loading-retry" type="button" hidden>Retry</button>
+    </div>
+  </div>`
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -176,6 +208,54 @@ export function renderTheoremExplorerHtml(
       line-height: 1.45;
       margin: 0;
       min-width: 0;
+    }
+    .static-loading {
+      align-items: center;
+      background: var(--page-background);
+      display: flex;
+      inset: 0;
+      justify-content: center;
+      padding: 24px;
+      position: fixed;
+      z-index: 100;
+    }
+    .static-loading[hidden] {
+      display: none;
+    }
+    .static-loading-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 10px 35px color-mix(in srgb, black 18%, transparent);
+      max-width: 460px;
+      padding: 24px;
+      width: min(100%, 460px);
+    }
+    .static-loading-card h1 {
+      font-size: 1.35rem;
+      margin: 0 0 8px;
+    }
+    .static-loading-card p {
+      margin: 8px 0;
+    }
+    .static-loading-card progress {
+      display: block;
+      height: 12px;
+      margin: 14px 0 8px;
+      width: 100%;
+    }
+    .static-loading-detail {
+      color: var(--muted);
+      min-height: 1.45em;
+    }
+    .static-loading-card button {
+      background: var(--accent);
+      border: 0;
+      border-radius: 6px;
+      color: white;
+      cursor: pointer;
+      margin-top: 8px;
+      padding: 7px 14px;
     }
     a {
       color: var(--vscode-textLink-foreground, var(--accent));
@@ -1398,10 +1478,13 @@ export function renderTheoremExplorerHtml(
   <script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 </head>
 <body>
+  ${staticLoadingOverlay}
   ${explorerBody}
   <script>
     const vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : undefined;
-    let payload = ${jsonForScript(payload)};
+    const staticDataUrl = ${staticDataUrl};
+    const staticDataBase64 = ${staticDataBase64};
+    let payload = ${jsonForScript(initialPayload)};
     let theoremMap = createTheoremMap(payload);
     let definitionMap = createDefinitionMap(payload);
     let publicTheoremList = payload.theorems.filter((theorem) => !theorem.isPrivate);
@@ -1459,6 +1542,11 @@ export function renderTheoremExplorerHtml(
     const overviewMilestones = document.getElementById("overview-milestones");
     const themeToggle = document.getElementById("theme-toggle");
     const themeIcon = document.getElementById("theme-icon");
+    const staticLoading = document.getElementById("static-loading");
+    const staticLoadingMessage = document.getElementById("static-loading-message");
+    const staticLoadingProgress = document.getElementById("static-loading-progress");
+    const staticLoadingDetail = document.getElementById("static-loading-detail");
+    const staticLoadingRetry = document.getElementById("static-loading-retry");
 
     function clearTypesetMath(element) {
       const mathJax = window.MathJax;
@@ -1574,6 +1662,311 @@ export function renderTheoremExplorerHtml(
           () => window.requestAnimationFrame(() => applyMeasuredGraphLayout(scheduledLayout, scheduledVersion))
         );
       });
+    }
+
+    function staticShortLeanName(name) {
+      const parts = String(name || "").split(".").filter(Boolean);
+      return parts[parts.length - 1] || String(name || "");
+    }
+
+    function staticLeanModuleName(name) {
+      const parts = String(name || "").split(".").filter(Boolean);
+      return parts.length > 1 ? parts.slice(0, -1).join(".") : "";
+    }
+
+    function decodeStaticExternalLink(compact) {
+      const link = {
+        target: compact[0],
+        label: compact[1]
+      };
+      if (compact[2]) {
+        link.detail = compact[2];
+      }
+      if (compact[3]) {
+        link.proofOnly = true;
+      }
+      return link;
+    }
+
+    function decodeStaticLeanLink(compact, declarations, detailKind) {
+      if (typeof compact !== "number") {
+        return decodeStaticExternalLink(compact);
+      }
+      const declaration = declarations[Math.abs(compact) - 1];
+      if (!declaration) {
+        return { target: "", label: "", proofOnly: compact < 0 };
+      }
+      const link = {
+        target: declaration.target,
+        label: declaration.displayName,
+        detail: detailKind === "source"
+          ? declaration.sourceName
+          : declaration.moduleName || declaration.relativePath
+      };
+      if (compact < 0) {
+        link.proofOnly = true;
+      }
+      return link;
+    }
+
+    function decodeStaticExplorerPayload(compact) {
+      if (!compact || compact.schemaVersion !== 1) {
+        throw new Error("Unsupported Handwave graph data.");
+      }
+      const statusCategories = ["green", "yellow", "red", "unknown"];
+      const privateFlag = 1;
+      const milestoneFlag = 2;
+      const displayNameHasMathFlag = 4;
+      const declarations = [];
+      const theoremItemCount = compact.theoremItems.length;
+      const theorems = compact.theoremItems.map((item, index) => {
+        const name = compact.names[index] || "";
+        const sourceName = item[0] || name;
+        const relativePath = item[2];
+        const theorem = {
+          name,
+          sourceName,
+          shortName: staticShortLeanName(sourceName),
+          displayName: item[1],
+          displayNameHasMath: Boolean(item[3] & displayNameHasMathFlag),
+          moduleName: staticLeanModuleName(sourceName),
+          uri: relativePath,
+          relativePath,
+          target: "lean:" + name,
+          tags: item[4] === 0 ? [] : item[4],
+          milestone: Boolean(item[3] & milestoneFlag),
+          isPrivate: Boolean(item[3] & privateFlag),
+          dependencies: [],
+          definitions: [],
+          dependents: [],
+          referencingDefinitions: [],
+          references: [],
+          statusCategory: statusCategories[item[5]] || "unknown",
+          statusHtml: compact.statusHtml[item[6]] || ""
+        };
+        declarations.push(theorem);
+        return theorem;
+      });
+      const definitions = compact.definitionItems.map((item, index) => {
+        const name = compact.names[theoremItemCount + index] || "";
+        const sourceName = item[0] || name;
+        const relativePath = item[2];
+        const definition = {
+          name,
+          sourceName,
+          shortName: staticShortLeanName(sourceName),
+          displayName: item[1],
+          displayNameHasMath: Boolean(item[3] & displayNameHasMathFlag),
+          moduleName: staticLeanModuleName(sourceName),
+          uri: relativePath,
+          relativePath,
+          target: "lean:" + name,
+          isPrivate: Boolean(item[3] & privateFlag),
+          definitions: [],
+          theorems: [],
+          referencingDefinitions: [],
+          referencingTheorems: [],
+          references: []
+        };
+        declarations.push(definition);
+        return definition;
+      });
+      for (const [index, item] of compact.theoremItems.entries()) {
+        const theorem = theorems[index];
+        theorem.dependencies = item[7].map((dependency) =>
+          typeof dependency === "number"
+            ? declarations[dependency - 1]?.name || ""
+            : dependency
+        ).filter(Boolean);
+        theorem.definitions =
+          item[8].map((link) => decodeStaticLeanLink(link, declarations, "source"));
+        theorem.dependents =
+          item[9].map((link) => decodeStaticLeanLink(link, declarations, "module"));
+        theorem.referencingDefinitions =
+          item[10].map((link) => decodeStaticLeanLink(link, declarations, "module"));
+        theorem.references = item[11].map(decodeStaticExternalLink);
+      }
+      for (const [index, item] of compact.definitionItems.entries()) {
+        const definition = definitions[index];
+        definition.definitions =
+          item[4].map((link) => decodeStaticLeanLink(link, declarations, "source"));
+        definition.theorems =
+          item[5].map((link) => decodeStaticLeanLink(link, declarations, "source"));
+        definition.referencingDefinitions =
+          item[6].map((link) => decodeStaticLeanLink(link, declarations, "module"));
+        definition.referencingTheorems =
+          item[7].map((link) => decodeStaticLeanLink(link, declarations, "module"));
+        definition.references = item[8].map(decodeStaticExternalLink);
+      }
+      return {
+        generatedAt: compact.generatedAt,
+        theoremCount: compact.counts[0],
+        definitionCount: compact.counts[1],
+        milestoneCount: compact.counts[2],
+        theorems,
+        definitions
+      };
+    }
+
+    function formatStaticDataSize(bytes) {
+      if (!Number.isFinite(bytes) || bytes <= 0) {
+        return "";
+      }
+      return (bytes / (1024 * 1024)).toFixed(bytes >= 1024 * 1024 ? 1 : 2) + " MiB";
+    }
+
+    function updateStaticLoadingProgress(received, total) {
+      if (!staticLoadingProgress || !staticLoadingDetail) {
+        return;
+      }
+      if (total > 0) {
+        staticLoadingProgress.max = total;
+        staticLoadingProgress.value = Math.min(received, total);
+        staticLoadingDetail.textContent =
+          formatStaticDataSize(received) + " / " + formatStaticDataSize(total);
+      } else {
+        staticLoadingProgress.removeAttribute("value");
+        staticLoadingDetail.textContent = formatStaticDataSize(received);
+      }
+    }
+
+    function setStaticLoadingPhase(message, detail = "") {
+      if (staticLoadingMessage) {
+        staticLoadingMessage.textContent = message;
+      }
+      if (staticLoadingDetail) {
+        staticLoadingDetail.textContent = detail;
+      }
+    }
+
+    async function downloadStaticDataText() {
+      const response = await fetch(staticDataUrl, { cache: "no-cache" });
+      if (!response.ok) {
+        throw new Error("The theorem data request failed with HTTP " + String(response.status) + ".");
+      }
+      const total = Number(response.headers.get("content-length")) || 0;
+      let received = 0;
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("This browser cannot stream the theorem data response.");
+      }
+      const first = await reader.read();
+      if (first.done || !first.value) {
+        throw new Error("The theorem data response was empty.");
+      }
+      const isGzip =
+        first.value.byteLength >= 2 &&
+        first.value[0] === 0x1f &&
+        first.value[1] === 0x8b;
+      const progressTotal = isGzip ? total : 0;
+      const dataStream = new ReadableStream({
+        start(controller) {
+          received += first.value.byteLength;
+          updateStaticLoadingProgress(received, progressTotal);
+          controller.enqueue(first.value);
+        },
+        async pull(controller) {
+          const next = await reader.read();
+          if (next.done) {
+            controller.close();
+            return;
+          }
+          received += next.value.byteLength;
+          updateStaticLoadingProgress(received, progressTotal);
+          controller.enqueue(next.value);
+        },
+        cancel(reason) {
+          return reader.cancel(reason);
+        }
+      });
+      if (!isGzip) {
+        // Fetch transparently decodes Content-Encoding. Accept that form too,
+        // in case a static host serves the .gz file as an encoded response.
+        return new Response(dataStream).text();
+      }
+      if (typeof DecompressionStream !== "function") {
+        await reader.cancel();
+        throw new Error("This browser does not support gzip decompression streams.");
+      }
+      return new Response(dataStream.pipeThrough(new DecompressionStream("gzip"))).text();
+    }
+
+    async function embeddedStaticDataText() {
+      if (typeof DecompressionStream !== "function") {
+        throw new Error("This browser does not support gzip decompression streams.");
+      }
+      const binary = window.atob(staticDataBase64);
+      const compressed = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        compressed[index] = binary.charCodeAt(index);
+      }
+      updateStaticLoadingProgress(compressed.byteLength, compressed.byteLength);
+      return new Response(
+        new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"))
+      ).text();
+    }
+
+    async function readStaticDataText() {
+      if (staticDataBase64) {
+        return embeddedStaticDataText();
+      }
+      if (staticDataUrl) {
+        return downloadStaticDataText();
+      }
+      throw new Error("No Handwave theorem data source was configured.");
+    }
+
+    async function loadStaticApplicationData() {
+      if (!staticDataUrl && !staticDataBase64) {
+        initializeApplication();
+        return;
+      }
+      if (staticLoadingRetry) {
+        staticLoadingRetry.hidden = true;
+      }
+      if (staticLoadingProgress) {
+        staticLoadingProgress.removeAttribute("value");
+      }
+      setStaticLoadingPhase(
+        staticDataBase64 ? "Preparing embedded theorem data…" : "Downloading theorem data…"
+      );
+      try {
+        const text = await readStaticDataText();
+        setStaticLoadingPhase("Preparing theorem explorer…");
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+        const data = JSON.parse(text);
+        if (!data || data.schemaVersion !== 1) {
+          throw new Error("Unsupported Handwave static data.");
+        }
+        payload = decodeStaticExplorerPayload(data.graph);
+        theoremMap = createTheoremMap(payload);
+        definitionMap = createDefinitionMap(payload);
+        publicTheoremList = payload.theorems.filter((theorem) => !theorem.isPrivate);
+        publicDefinitionList =
+          (payload.definitions || []).filter((definition) => !definition.isPrivate);
+        previewHtmlByName.clear();
+        articleHtmlByTarget.clear();
+        for (const entry of data.previews || []) {
+          previewHtmlByName.set(entry[0], entry[1]);
+        }
+        for (const entry of data.articles || []) {
+          articleHtmlByTarget.set(entry[0], entry[1]);
+        }
+        articleSearchItems.splice(0, articleSearchItems.length, ...(data.articleItems || []));
+        if (staticLoading) {
+          staticLoading.hidden = true;
+        }
+        initializeApplication();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStaticLoadingPhase("Handwave could not load its theorem data.", message);
+        if (staticLoadingProgress) {
+          staticLoadingProgress.removeAttribute("value");
+        }
+        if (staticLoadingRetry) {
+          staticLoadingRetry.hidden = false;
+        }
+      }
     }
 
     function createTheoremMap(sourcePayload) {
@@ -4083,22 +4476,43 @@ export function renderTheoremExplorerHtml(
       restoreApplicationHistory(event.state);
     });
 
-    syncThemeControl();
-    if (applicationShellEnabled) {
-      restoreApplicationHistory(window.history.state);
-      recordApplicationHistory("replace");
-    } else {
-      updateApplicationView("explorer");
-      updateRenderedSearchValue();
-      renderExplorerGraph();
+    let applicationInitialized = false;
+
+    function initializeApplication() {
+      if (applicationInitialized) {
+        return;
+      }
+      applicationInitialized = true;
+      syncThemeControl();
+      if (applicationShellEnabled) {
+        restoreApplicationHistory(window.history.state);
+        recordApplicationHistory("replace");
+      } else {
+        updateApplicationView("explorer");
+        updateRenderedSearchValue();
+        renderExplorerGraph();
+      }
     }
+
+    staticLoadingRetry?.addEventListener("click", () => {
+      void loadStaticApplicationData();
+    });
+
     window.addEventListener("load", () => {
+      if (!applicationInitialized) {
+        return;
+      }
       updateRenderedSearchValue();
       scheduleSearchMathTypeset();
       if (applicationShellEnabled && application?.dataset.view === "overview") {
         renderOverview();
       }
     });
+    if (staticDataUrl || staticDataBase64) {
+      void loadStaticApplicationData();
+    } else {
+      initializeApplication();
+    }
   </script>
 </body>
 </html>`;

@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { promises as fs } from "node:fs";
+import { gzipSync } from "node:zlib";
 import {
   buildTheoremExplorerPayload,
   TheoremExplorerPayload
@@ -16,6 +17,10 @@ import {
   TheoremExplorerArticleItem
 } from "../web/explorer";
 import { loadStaticLeanArtifactMetadata } from "./artifacts";
+import {
+  encodeStaticExplorerPayload,
+  HandwaveStaticData
+} from "./data";
 
 const excludedDirectoryNames = new Set([
   ".git",
@@ -33,16 +38,30 @@ interface StaticArticleSource {
 
 export interface HandwaveStaticSite {
   html: string;
+  data: Buffer;
+  dataFileName: string;
+  singlePage: boolean;
   declarationCount: number;
   theoremCount: number;
   articleCount: number;
 }
 
 export interface HandwaveStaticSiteExportResult extends HandwaveStaticSite {
+  outputDirectory: string;
   outputFile: string;
+  dataFile?: string;
 }
 
-export async function buildHandwaveStaticSite(rootDirectory: string): Promise<HandwaveStaticSite> {
+export interface HandwaveStaticSiteOptions {
+  singlePage?: boolean;
+}
+
+const staticDataFileName = "handwave-data.json.gz";
+
+export async function buildHandwaveStaticSite(
+  rootDirectory: string,
+  options: HandwaveStaticSiteOptions = {}
+): Promise<HandwaveStaticSite> {
   const root = path.resolve(rootDirectory);
   const files = await collectWorkspaceFiles(root);
   const parsedDeclarations = await parseLeanFiles(files.filter(isLeanFile));
@@ -98,15 +117,28 @@ export async function buildHandwaveStaticSite(rootDirectory: string): Promise<Ha
     });
   }
 
+  const staticData: HandwaveStaticData = {
+    schemaVersion: 1,
+    graph: encodeStaticExplorerPayload(payload),
+    previews: [...previewHtmlByName],
+    articles: [...articleHtmlByTarget],
+    articleItems
+  };
+  const data = gzipSync(Buffer.from(JSON.stringify(staticData), "utf8"), { level: 9 });
+  const singlePage = options.singlePage === true;
+
   return {
     html: renderTheoremExplorerHtml(payload, {
-      previewHtmlByName,
-      articleHtmlByTarget,
-      articleItems,
       milestoneControls: false,
       localNavigation: true,
-      applicationShell: true
+      applicationShell: true,
+      ...(singlePage
+        ? { staticDataBase64: data.toString("base64") }
+        : { staticDataUrl: staticDataFileName })
     }),
+    data,
+    dataFileName: staticDataFileName,
+    singlePage,
     declarationCount: indexedDeclarations.length,
     theoremCount: payload.theoremCount,
     articleCount: articles.length
@@ -115,13 +147,43 @@ export async function buildHandwaveStaticSite(rootDirectory: string): Promise<Ha
 
 export async function exportHandwaveStaticSite(
   rootDirectory: string,
-  outputFile: string
+  outputDirectory: string,
+  options: HandwaveStaticSiteOptions = {}
 ): Promise<HandwaveStaticSiteExportResult> {
-  const site = await buildHandwaveStaticSite(rootDirectory);
-  const resolvedOutput = path.resolve(outputFile);
-  await fs.mkdir(path.dirname(resolvedOutput), { recursive: true });
-  await fs.writeFile(resolvedOutput, site.html, "utf8");
-  return { ...site, outputFile: resolvedOutput };
+  const site = await buildHandwaveStaticSite(rootDirectory, options);
+  const resolvedOutputDirectory = path.resolve(outputDirectory);
+  const outputFile = path.join(resolvedOutputDirectory, "index.html");
+  const dataFile = path.join(resolvedOutputDirectory, site.dataFileName);
+  await fs.mkdir(resolvedOutputDirectory, { recursive: true });
+  if (site.singlePage) {
+    await fs.writeFile(outputFile, site.html, "utf8");
+    await removeGeneratedDataFile(dataFile);
+    return {
+      ...site,
+      outputDirectory: resolvedOutputDirectory,
+      outputFile
+    };
+  }
+  await Promise.all([
+    fs.writeFile(outputFile, site.html, "utf8"),
+    fs.writeFile(dataFile, site.data)
+  ]);
+  return {
+    ...site,
+    outputDirectory: resolvedOutputDirectory,
+    outputFile,
+    dataFile
+  };
+}
+
+async function removeGeneratedDataFile(dataFile: string): Promise<void> {
+  try {
+    await fs.unlink(dataFile);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
 }
 
 async function collectWorkspaceFiles(directory: string): Promise<string[]> {

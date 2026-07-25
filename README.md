@@ -152,17 +152,34 @@ After installation, reload VS Code and open a Lean project.
 
 ### Static Site Generator
 
-The static generator writes the browser application, all theorem and definition previews, and all Handwave articles to one HTML file:
+The static generator writes a lightweight browser application and a compressed data bundle containing the theorem graph, declaration previews, and Handwave articles:
 
 ```sh
 npm run export-site -- \
   --root /path/to/lean/workspace \
-  --output /path/to/site/index.html
+  --output /path/to/site
 ```
 
-If `--root` is omitted, it defaults to the current directory. If `--output` is omitted, the exporter writes `handwave-site/index.html` below the selected root. The result uses repository-relative paths and needs no VS Code process, Handwave server, or runtime API calls. MathJax itself is loaded from jsDelivr.
+If `--root` is omitted, it defaults to the current directory. `--output` names an output directory and defaults to `handwave-site` below the selected root. The exporter writes `index.html` and `handwave-data.json.gz` inside that directory; deploy both files together. The HTML page downloads and decompresses the bundle in the browser, displaying byte and progress information while it loads. The result uses repository-relative paths and needs no VS Code process, Handwave server, or runtime API calls. MathJax itself is loaded from jsDelivr.
 
-The generated site is read-only. Its Overview lists the article tree and milestone theorems. Unified search covers articles, modules, theorems, and definitions; the explorer shows theorem dependencies and the theorems that use a selected definition. The preview sidebars connect theorems, definitions, and article backlinks. Article and declaration links, includes, local anchors, MathJax rendering, light/dark themes, reloadable hash URLs, browser history, and the foldable article table of contents all work within the generated file.
+The generated site is read-only. Its Overview lists the article tree and milestone theorems. Unified search covers articles, modules, theorems, and definitions; the explorer shows theorem dependencies and the theorems that use a selected definition. The preview sidebars connect theorems, definitions, and article backlinks. Article and declaration links, includes, local anchors, MathJax rendering, light/dark themes, reloadable hash URLs, browser history, and the foldable article table of contents all work after the bundle loads.
+
+Because browsers fetch the data bundle separately, serve the output directory over HTTP rather than opening `index.html` directly as a `file:` URL. Any ordinary static host works, including GitHub Pages. For a quick local check:
+
+```sh
+python3 -m http.server --directory /path/to/site
+```
+
+For a self-contained page that can instead be opened directly from disk, embed the same gzip-compressed data in `index.html`:
+
+```sh
+npm run export-site -- \
+  --root /path/to/lean/workspace \
+  --output /path/to/single-page-site \
+  --single-page
+```
+
+Single-page mode does not write a separate data blob. Its HTML file is larger because base64 encoding adds overhead, but the browser still decompresses the compact data only when the application starts.
 
 At export time Handwave reads available `.ilean` metadata and valid entries in `.lake/handwave/artifact-index-v1.json`. An available artifact is used even when its source file is newer, in which case the displayed Lean status is marked stale. If artifact information is unavailable, Handwave infers a source-snapshot graph and propagates direct `sorry` and `admit` uses through indexed dependencies. A source-inferred green badge is not a substitute for rebuilding Lean artifacts.
 
@@ -243,7 +260,7 @@ Handwave keeps its shared indexing and rendering code separate from host integra
 - `src/handwave/` contains the host-neutral project model, parsers, index, artifact readers, preview renderer, and theorem-explorer payload builder.
 - `src/web/` contains the browser application rendered into a webview or standalone page. It does not load the VS Code API at runtime.
 - `src/vscode/` contains the adapters that connect browser messages and shared Handwave data to VS Code.
-- `src/static/` contains the workspace crawler, passive artifact reader, single-file exporter, and static-export CLI.
+- `src/static/` contains the workspace crawler, passive artifact reader, compressed static exporter, and static-export CLI.
 - `src/server/` contains the loopback HTTP adapter, live-file workspace, and in-place browser editor integration.
 - `src/extension.ts` is the VS Code composition root.
 

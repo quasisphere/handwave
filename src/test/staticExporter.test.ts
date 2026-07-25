@@ -4,10 +4,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promises as fs } from "node:fs";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 import { handwaveMathJaxConfiguration } from "../handwave/mathJax";
 import { parseLeanDocument } from "../handwave/parser";
 import { loadStaticLeanArtifactMetadata } from "../static/artifacts";
-import { buildHandwaveStaticSite, exportHandwaveStaticSite } from "../static/exporter";
+import { decodeStaticExplorerPayload, HandwaveStaticData } from "../static/data";
+import {
+  buildHandwaveStaticSite,
+  exportHandwaveStaticSite,
+  HandwaveStaticSite
+} from "../static/exporter";
 
 const sampleLean = `def StaticSample.zero : Nat := 0
 
@@ -133,7 +139,7 @@ test("uses available ilean dependencies when the source has a newer mtime", asyn
   }
 });
 
-test("builds a self-contained static theorem explorer without workspace path leaks", async () => {
+test("builds a compressed static theorem explorer without workspace path leaks", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "handwave-static-"));
   try {
     await fs.mkdir(path.join(root, "Project"), { recursive: true });
@@ -186,20 +192,35 @@ test("builds a self-contained static theorem explorer without workspace path lea
     );
 
     const site = await buildHandwaveStaticSite(root);
+    const staticData = staticSiteData(site);
+    const staticDataJson = gunzipSync(site.data).toString("utf8");
     assert.equal(site.declarationCount, 5);
     assert.equal(site.theoremCount, 3);
     assert.equal(site.articleCount, 4);
     assert.doesNotMatch(site.html, new RegExp(escapeRegExp(root)));
-    assert.match(site.html, /const previewHtmlByName = new Map\(\[\[/);
-    assert.match(site.html, /const articleHtmlByTarget = new Map\(\[\[/);
-    assert.match(site.html, /const articleSearchItems = \[\{/);
+    assert.doesNotMatch(staticDataJson, new RegExp(escapeRegExp(root)));
+    assert.match(site.html, /const staticDataUrl = "handwave-data\.json\.gz"/);
+    assert.match(site.html, /const staticDataBase64 = undefined/);
+    assert.match(site.html, /const previewHtmlByName = new Map\(\)/);
+    assert.match(site.html, /const articleHtmlByTarget = new Map\(\)/);
+    assert.match(site.html, /const articleSearchItems = \[\]/);
     assert.match(site.html, /const applicationShellEnabled = true;/);
+    assert.match(site.html, /id="static-loading-progress"/);
+    assert.match(site.html, /function decodeStaticExplorerPayload\(compact\)/);
+    assert.match(site.html, /new DecompressionStream\("gzip"\)/);
+    assert.match(site.html, /first\.value\[0\] === 0x1f/);
+    assert.match(site.html, /updateStaticLoadingProgress\(received, progressTotal\)/);
+    assert.match(site.html, /void loadStaticApplicationData\(\)/);
     assert.ok(site.html.includes(JSON.stringify(handwaveMathJaxConfiguration.tex.macros.fint)));
-    assert.match(site.html, /article:handwave\/sample\.hw\.md/);
-    assert.match(site.html, /"title":"Sample","relativePath":"handwave\/sample\.hw\.md"/);
-    assert.match(site.html, /"relativePath":"handwave\/Alpha\/alpha\.hw\.md"/);
-    assert.match(site.html, /"relativePath":"handwave\/Alpha\/Nested\/nested\.hw\.md"/);
-    assert.match(site.html, /"relativePath":"handwave\/Beta\/beta\.hw\.md"/);
+    assert.deepEqual(
+      staticData.articleItems.map((article) => article.relativePath),
+      [
+        "handwave/Alpha/alpha.hw.md",
+        "handwave/Alpha/Nested/nested.hw.md",
+        "handwave/Beta/beta.hw.md",
+        "handwave/sample.hw.md"
+      ]
+    );
     assert.match(site.html, /id="navigation-toggle"/);
     assert.match(site.html, /data-view="overview"/);
     assert.match(site.html, /data-switch-view="overview"/);
@@ -232,7 +253,7 @@ test("builds a self-contained static theorem explorer without workspace path lea
       /function openTargetLocally\(target\) \{[\s\S]*?restrictToTheorem\(theorem\);/
     );
     assert.match(site.html, /id="search-rendered"/);
-    assert.match(site.html, /Base theorem for \$P\$/);
+    assert.match(staticPreviewHtml(site, "StaticSample.base"), /Base theorem for \$P\$/);
     assert.match(site.html, /function containsMathDelimiter\(value\)/);
     assert.match(site.html, /data-search-math/);
     assert.match(site.html, /scheduleSearchMathTypeset\(\)/);
@@ -246,13 +267,13 @@ test("builds a self-contained static theorem explorer without workspace path lea
       site.html,
       /\.graph-node:hover,\s*\.graph-node-selected \{\s*background: color-mix\(in srgb, currentColor 9%, var\(--page-background\)\);/
     );
-    assert.match(site.html, /StaticSample\.base/);
-    assert.match(site.html, /StaticSample\.value/);
-    assert.doesNotMatch(site.html, /Shadow copy that must not leak/);
-    assert.doesNotMatch(site.html, /challenge copy must not replace/);
+    assert.match(staticDataJson, /StaticSample\.base/);
+    assert.match(staticDataJson, /StaticSample\.value/);
+    assert.doesNotMatch(staticDataJson, /Shadow copy that must not leak/);
+    assert.doesNotMatch(staticDataJson, /challenge copy must not replace/);
     assert.match(site.html, /check-status-checked/);
     assert.match(site.html, /check-status-unchecked/);
-    const theoremPayload = staticTheoremPayload(site.html);
+    const theoremPayload = staticTheoremPayload(site);
     assert.match(
       theoremPayload.find((theorem) => theorem.name === "StaticSample.base")?.statusHtml ?? "",
       /check-status-checked/
@@ -266,7 +287,7 @@ test("builds a self-contained static theorem explorer without workspace path lea
       "red"
     );
     assert.ok(theoremPayload.every((theorem) => !theorem.statusHtml.includes("check-status-pending")));
-    const explorerPayload = staticExplorerPayload(site.html);
+    const explorerPayload = staticExplorerPayload(site);
     const valueDefinition = explorerPayload.definitions.find(
       (definition) => definition.name === "StaticSample.value"
     );
@@ -312,7 +333,7 @@ test("builds a self-contained static theorem explorer without workspace path lea
     assert.match(site.html, /\.preview \.source-popover \{/);
     assert.match(site.html, /\.preview \.theorem-line > \.check-status \{/);
     assert.match(site.html, /\.preview \.theorem-view \+ \.theorem-view,/);
-    const basePreview = staticPreviewHtml(site.html, "StaticSample.base");
+    const basePreview = staticPreviewHtml(site, "StaticSample.base");
     assert.match(basePreview, /aria-label="Theorem view"/);
     assert.match(basePreview, /aria-label="Proof view"/);
     assert.equal((basePreview.match(/data-set-mode="lean"/g) ?? []).length, 2);
@@ -321,10 +342,10 @@ test("builds a self-contained static theorem explorer without workspace path lea
     assert.doesNotMatch(basePreview, /aria-label="Definitions referenced in theorem statement"/);
     assert.match(site.html, /"Definitions used by this definition"/);
     assert.match(
-      staticArticleHtml(site.html, "article:handwave/sample.hw.md"),
+      staticArticleHtml(site, "article:handwave/sample.hw.md"),
       /aria-label="Definitions referenced in theorem statement"/
     );
-    const definitionPreview = staticPreviewHtml(site.html, "StaticSample.value");
+    const definitionPreview = staticPreviewHtml(site, "StaticSample.value");
     assert.match(definitionPreview, /class="definition-view"/);
     assert.match(site.html, /applyHandwaveSectionMode\(section, nextMode/);
     assert.match(site.html, /function showArticle\(target, updateSearch = false, recordHistory = true\)/);
@@ -363,7 +384,7 @@ test("builds a self-contained static theorem explorer without workspace path lea
       /view: window\.location\.hash === "#explorer" \? "explorer" : "overview"/
     );
     assert.match(site.html, /localStorage\.setItem\("handwave-theme", nextTheme\)/);
-    assert.match(site.html, /Return to details/);
+    assert.match(staticArticleHtml(site, "article:handwave/sample.hw.md"), /Return to details/);
     assert.doesNotMatch(
       site.html,
       /injectPreviewMilestoneControl\(previewHtml, theorem\) \+ renderViewerInfo\(theorem\)/
@@ -373,10 +394,38 @@ test("builds a self-contained static theorem explorer without workspace path lea
       assert.doesNotThrow(() => new Function(script[1]));
     }
 
-    const output = path.join(root, "site", "index.html");
-    const exported = await exportHandwaveStaticSite(root, output);
+    const outputDirectory = path.join(root, "site");
+    const output = path.join(outputDirectory, "index.html");
+    const exported = await exportHandwaveStaticSite(root, outputDirectory);
+    assert.equal(exported.outputDirectory, outputDirectory);
     assert.equal(exported.outputFile, output);
+    assert.equal(exported.dataFile, path.join(root, "site", "handwave-data.json.gz"));
     assert.equal(await fs.readFile(output, "utf8"), exported.html);
+    assert.ok(exported.dataFile);
+    assert.deepEqual(await fs.readFile(exported.dataFile), exported.data);
+
+    const singlePageDirectory = path.join(root, "single-page");
+    const staleDataFile = path.join(singlePageDirectory, "handwave-data.json.gz");
+    await fs.mkdir(singlePageDirectory, { recursive: true });
+    await fs.writeFile(staleDataFile, "stale");
+    const singlePage = await exportHandwaveStaticSite(root, singlePageDirectory, {
+      singlePage: true
+    });
+    assert.equal(singlePage.singlePage, true);
+    assert.equal(singlePage.outputDirectory, singlePageDirectory);
+    assert.equal(singlePage.outputFile, path.join(singlePageDirectory, "index.html"));
+    assert.equal(singlePage.dataFile, undefined);
+    assert.doesNotMatch(singlePage.html, /const staticDataUrl = "handwave-data\.json\.gz"/);
+    assert.match(singlePage.html, /const staticDataUrl = undefined/);
+    assert.match(singlePage.html, /const staticDataBase64 = "[A-Za-z0-9+/=]+"/);
+    assert.match(singlePage.html, /function embeddedStaticDataText\(\)/);
+    assert.match(singlePage.html, /window\.atob\(staticDataBase64\)/);
+    assert.deepEqual(embeddedStaticSiteData(singlePage.html), staticSiteData(singlePage));
+    assert.equal(await fs.readFile(singlePage.outputFile, "utf8"), singlePage.html);
+    await assert.rejects(fs.access(staleDataFile), { code: "ENOENT" });
+    for (const script of singlePage.html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)) {
+      assert.doesNotThrow(() => new Function(script[1]));
+    }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -425,15 +474,15 @@ async function writeSampleArtifacts(root: string, leanFile: string): Promise<voi
   await fs.writeFile(cacheFile, JSON.stringify({ schemaVersion: 1, entries }), "utf8");
 }
 
-function staticTheoremPayload(html: string): Array<{
+function staticTheoremPayload(site: HandwaveStaticSite): Array<{
   name: string;
   statusCategory: string;
   statusHtml: string;
 }> {
-  return staticExplorerPayload(html).theorems;
+  return staticExplorerPayload(site).theorems;
 }
 
-function staticExplorerPayload(html: string): {
+function staticExplorerPayload(site: HandwaveStaticSite): {
   theorems: Array<{ name: string; statusCategory: string; statusHtml: string }>;
   definitions: Array<{
     name: string;
@@ -442,10 +491,7 @@ function staticExplorerPayload(html: string): {
     referencingTheorems: Array<{ target: string }>;
   }>;
 } {
-  const marker = "let payload = ";
-  const start = html.indexOf(marker) + marker.length;
-  const end = html.indexOf(";\n    let theoremMap", start);
-  return JSON.parse(html.slice(start, end)) as {
+  return decodeStaticExplorerPayload(staticSiteData(site).graph) as {
     theorems: Array<{ name: string; statusCategory: string; statusHtml: string }>;
     definitions: Array<{
       name: string;
@@ -456,20 +502,22 @@ function staticExplorerPayload(html: string): {
   };
 }
 
-function staticPreviewHtml(html: string, name: string): string {
-  const marker = "const previewHtmlByName = new Map(";
-  const start = html.indexOf(marker) + marker.length;
-  const end = html.indexOf(");\n    const articleHtmlByTarget", start);
-  const entries = JSON.parse(html.slice(start, end)) as Array<[string, string]>;
-  return new Map(entries).get(name) ?? "";
+function staticPreviewHtml(site: HandwaveStaticSite, name: string): string {
+  return new Map(staticSiteData(site).previews).get(name) ?? "";
 }
 
-function staticArticleHtml(html: string, target: string): string {
-  const marker = "const articleHtmlByTarget = new Map(";
-  const start = html.indexOf(marker) + marker.length;
-  const end = html.indexOf(");\n    const articleSearchItems", start);
-  const entries = JSON.parse(html.slice(start, end)) as Array<[string, string]>;
-  return new Map(entries).get(target) ?? "";
+function staticArticleHtml(site: HandwaveStaticSite, target: string): string {
+  return new Map(staticSiteData(site).articles).get(target) ?? "";
+}
+
+function staticSiteData(site: HandwaveStaticSite): HandwaveStaticData {
+  return JSON.parse(gunzipSync(site.data).toString("utf8")) as HandwaveStaticData;
+}
+
+function embeddedStaticSiteData(html: string): HandwaveStaticData {
+  const match = html.match(/const staticDataBase64 = "([A-Za-z0-9+/=]+)"/);
+  assert.ok(match?.[1]);
+  return JSON.parse(gunzipSync(Buffer.from(match[1], "base64")).toString("utf8")) as HandwaveStaticData;
 }
 
 function escapeRegExp(value: string): string {

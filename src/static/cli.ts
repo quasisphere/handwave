@@ -3,7 +3,8 @@ import { exportHandwaveStaticSite } from "./exporter";
 
 interface StaticExportArguments {
   rootDirectory: string;
-  outputFile: string;
+  outputDirectory: string;
+  singlePage: boolean;
 }
 
 async function main(): Promise<void> {
@@ -13,11 +14,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const result = await exportHandwaveStaticSite(args.rootDirectory, args.outputFile);
-  process.stdout.write(
+  const result = await exportHandwaveStaticSite(args.rootDirectory, args.outputDirectory, {
+    singlePage: args.singlePage
+  });
+  const summary =
     `Exported ${result.theoremCount} theorems and ${result.articleCount} articles ` +
-    `from ${result.declarationCount} declarations to ${result.outputFile}.\n`
-  );
+    `from ${result.declarationCount} declarations to ${result.outputFile}`;
+  process.stdout.write(result.dataFile
+    ? `${summary}, with compressed data at ${result.dataFile}.\n`
+    : `${summary} as a self-contained page.\n`);
 }
 
 function parseArguments(argv: readonly string[]): StaticExportArguments | undefined {
@@ -26,9 +31,14 @@ function parseArguments(argv: readonly string[]): StaticExportArguments | undefi
   }
 
   let rootDirectory = process.cwd();
-  let outputFile: string | undefined;
+  let outputDirectory: string | undefined;
+  let singlePage = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--single-page") {
+      singlePage = true;
+      continue;
+    }
     if (argument === "--root" || argument === "--output") {
       const value = argv[index + 1];
       if (!value) {
@@ -37,7 +47,7 @@ function parseArguments(argv: readonly string[]): StaticExportArguments | undefi
       if (argument === "--root") {
         rootDirectory = path.resolve(value);
       } else {
-        outputFile = path.resolve(value);
+        outputDirectory = path.resolve(value);
       }
       index += 1;
       continue;
@@ -47,17 +57,20 @@ function parseArguments(argv: readonly string[]): StaticExportArguments | undefi
 
   return {
     rootDirectory,
-    outputFile: outputFile ?? path.join(rootDirectory, "handwave-site", "index.html")
+    outputDirectory: outputDirectory ?? path.join(rootDirectory, "handwave-site"),
+    singlePage
   };
 }
 
 function usage(): string {
   return [
-    "Usage: npm run export-site -- [--root PATH] [--output FILE]",
+    "Usage: npm run export-site -- [--root PATH] [--output DIRECTORY] [--single-page]",
     "",
-    "Build a single-file, read-only Handwave theorem explorer.",
-    "The root defaults to the current directory and the output defaults to",
-    "ROOT/handwave-site/index.html.",
+    "Build a compressed, read-only Handwave theorem explorer.",
+    "The root defaults to the current directory. The output directory defaults",
+    "to ROOT/handwave-site and normally contains index.html plus",
+    "handwave-data.json.gz. --single-page embeds the compressed data in",
+    "index.html so it can be opened directly without a web server.",
     ""
   ].join("\n");
 }

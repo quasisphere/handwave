@@ -1009,6 +1009,24 @@ export function renderTheoremExplorerHtml(
       padding: 10px 12px;
       white-space: pre-wrap;
     }
+    .article-view blockquote {
+      border-left: 3px solid var(--border);
+      color: var(--muted);
+      margin-left: 0;
+      padding-left: 1em;
+    }
+    .article-view > ul,
+    .article-view > ol,
+    .article-view blockquote ul,
+    .article-view blockquote ol,
+    .article-view .article-editable-list > ul,
+    .article-view .article-editable-list > ol {
+      padding-left: 1.65em;
+    }
+    .article-view li > ul,
+    .article-view li > ol {
+      margin: 0.25em 0;
+    }
     .theorem-view,
     .definition-view {
       margin: 0;

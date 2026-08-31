@@ -1,5 +1,8 @@
 import {
   ArticleDocument,
+  ArticleAnchor,
+  ArticleInclude,
+  ArticleLink,
   HandwaveDoc,
   LeanDeclaration,
   ParseIssue,
@@ -7,6 +10,17 @@ import {
   RangeLike
 } from "./types";
 import { rangeFromOffsets } from "./position";
+import {
+  handwaveMarkdownAnchor,
+  handwaveMarkdownHeading,
+  handwaveMarkdownInclude,
+  handwaveMarkdownLink,
+  handwaveMarkdownReferences,
+  markdownChildren,
+  parseHandwaveMarkdown,
+  type HandwaveMarkdownNode,
+  type HandwaveMarkdownTree
+} from "./markdown";
 
 const leanIdentifierSource = String.raw`[\p{L}_][\p{L}\p{N}\p{M}_']*`;
 const leanQualifiedIdentifierSource =
@@ -108,55 +122,72 @@ export function parseLeanDocument(text: string, uri: string): LeanDeclaration[] 
   ];
 }
 
-export function parseArticleDocument(text: string, uri: string): ArticleDocument {
-  const anchors = [];
-  const links = [];
-  const includes = [];
+export function parseArticleDocument(
+  text: string,
+  uri: string,
+  markdownTree: HandwaveMarkdownTree = parseHandwaveMarkdown(text)
+): ArticleDocument {
+  const anchors: ArticleAnchor[] = [];
+  const links: ArticleLink[] = [];
+  const includes: ArticleInclude[] = [];
   const errors: ParseIssue[] = [];
+  const references = handwaveMarkdownReferences(text, markdownTree);
 
-  const headingPattern = /^(#{1,6})\s+(.+)$/gm;
-  for (const match of text.matchAll(headingPattern)) {
-    const start = match.index ?? 0;
-    const title = match[2].trim();
-    anchors.push({
-      id: slugify(title),
-      title,
-      range: rangeFromOffsets(text, start, start + match[0].length)
-    });
-  }
+  const visit = (node: HandwaveMarkdownNode) => {
+    const heading = handwaveMarkdownHeading(text, node);
+    if (heading) {
+      anchors.push({
+        id: heading.explicitId ?? slugify(heading.title),
+        title: heading.title,
+        range: rangeFromOffsets(text, node.from, node.to)
+      });
+    }
 
-  const explicitAnchorPattern = /\{#([A-Za-z0-9_.:-]+)\}/g;
-  for (const match of text.matchAll(explicitAnchorPattern)) {
-    const start = match.index ?? 0;
-    anchors.push({
-      id: match[1],
-      title: match[1],
-      range: rangeFromOffsets(text, start, start + match[0].length)
-    });
-  }
+    const explicitAnchor = handwaveMarkdownAnchor(text, node);
+    if (explicitAnchor) {
+      let ancestor = node.parent;
+      let enclosingHeadingId: string | undefined;
+      while (ancestor) {
+        const ancestorHeading = handwaveMarkdownHeading(text, ancestor);
+        if (ancestorHeading) {
+          enclosingHeadingId = ancestorHeading.explicitId;
+          break;
+        }
+        ancestor = ancestor.parent;
+      }
+      if (enclosingHeadingId !== explicitAnchor.id) {
+        anchors.push({
+          id: explicitAnchor.id,
+          title: explicitAnchor.id,
+          range: rangeFromOffsets(text, node.from, node.to)
+        });
+      }
+    }
 
-  const linkPattern = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
-  for (const match of text.matchAll(linkPattern)) {
-    const start = match.index ?? 0;
-    const targetStart = start + match[0].lastIndexOf(match[2]);
-    links.push({
-      label: match[1],
-      target: match[2],
-      range: rangeFromOffsets(text, start, start + match[0].length),
-      targetRange: rangeFromOffsets(text, targetStart, targetStart + match[2].length)
-    });
-  }
+    const link = handwaveMarkdownLink(text, node, references);
+    if (link) {
+      links.push({
+        label: link.label,
+        target: link.target,
+        range: rangeFromOffsets(text, node.from, node.to),
+        targetRange: rangeFromOffsets(text, link.targetFrom, link.targetTo)
+      });
+    }
 
-  const includePattern = /@include\{([^}\s]+)\}/g;
-  for (const match of text.matchAll(includePattern)) {
-    const start = match.index ?? 0;
-    const targetStart = start + match[0].lastIndexOf(match[1]);
-    includes.push({
-      target: match[1],
-      range: rangeFromOffsets(text, start, start + match[0].length),
-      targetRange: rangeFromOffsets(text, targetStart, targetStart + match[1].length)
-    });
-  }
+    const include = handwaveMarkdownInclude(text, node);
+    if (include) {
+      includes.push({
+        target: include.target,
+        range: rangeFromOffsets(text, node.from, node.to),
+        targetRange: rangeFromOffsets(text, include.targetFrom, include.targetTo)
+      });
+    }
+
+    for (const child of markdownChildren(node)) {
+      visit(child);
+    }
+  };
+  visit(markdownTree.topNode);
 
   return { uri, anchors, links, includes, errors };
 }

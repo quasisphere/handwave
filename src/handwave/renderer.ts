@@ -1,4 +1,16 @@
 import { HandwaveIndex, isIndexedLeanDeclaration } from "./index";
+import {
+  handwaveMarkdownAnchor,
+  handwaveMarkdownHeading,
+  handwaveMarkdownInclude,
+  handwaveMarkdownLink,
+  handwaveMarkdownReferences,
+  markdownChildren,
+  parseHandwaveMarkdown,
+  type HandwaveMarkdownNode,
+  type HandwaveMarkdownReferences,
+  type HandwaveMarkdownTree
+} from "./markdown";
 import { renderMathJaxConfigurationScript } from "./mathJax";
 import {
   hasHandwaveTag,
@@ -47,8 +59,16 @@ export function renderArticleHtml(
   commandHref: (target: string) => string,
   options: RenderOptions = {}
 ): string {
-  const body = renderArticleFragmentHtml(text, uri, index, commandHref, options);
-  const article = parseArticleDocument(text, uri);
+  const markdownTree = parseHandwaveMarkdown(text);
+  const body = renderArticleFragmentHtmlFromTree(
+    text,
+    uri,
+    index,
+    commandHref,
+    options,
+    markdownTree
+  );
+  const article = parseArticleDocument(text, uri, markdownTree);
   const title = article.anchors[0]?.title ?? "Handwave Article";
 
   return renderHtmlShell(title, body, options);
@@ -60,6 +80,24 @@ export function renderArticleFragmentHtml(
   index: HandwaveIndex,
   commandHref: (target: string) => string,
   options: RenderOptions = {}
+): string {
+  return renderArticleFragmentHtmlFromTree(
+    text,
+    uri,
+    index,
+    commandHref,
+    options,
+    parseHandwaveMarkdown(text)
+  );
+}
+
+function renderArticleFragmentHtmlFromTree(
+  text: string,
+  uri: string,
+  index: HandwaveIndex,
+  commandHref: (target: string) => string,
+  options: RenderOptions,
+  markdownTree: HandwaveMarkdownTree
 ): string {
   const editorHref = options.editorHref ?? commandHref;
   const renderInclude = (target: string): string => {
@@ -87,7 +125,13 @@ export function renderArticleFragmentHtml(
     return `<div class="include" data-target="${escapeHtml(target)}">${preview}</div>`;
   };
 
-  return renderBlocks(text, commandHref, options.editableArticles === true, renderInclude);
+  return renderMarkdownDocument(
+    text,
+    markdownTree,
+    commandHref,
+    options.editableArticles === true,
+    renderInclude
+  );
 }
 
 export function renderLeanDocumentHtml(
@@ -636,6 +680,18 @@ function renderHtmlShell(
       margin-left: 0;
       padding-left: 1em;
     }
+    body > ul,
+    body > ol,
+    blockquote ul,
+    blockquote ol,
+    .article-editable-list > ul,
+    .article-editable-list > ol {
+      padding-left: 1.65em;
+    }
+    li > ul,
+    li > ol {
+      margin: 0.25em 0;
+    }
     mjx-container {
       overflow-x: auto;
       overflow-y: hidden;
@@ -877,142 +933,451 @@ ${body}
 </html>`;
 }
 
-function renderBlocks(
-  text: string,
-  commandHref: (target: string) => string,
-  editableArticles = false,
-  renderInclude?: (target: string) => string
-): string {
-  const lines = sourceLines(text);
-  const blocks: string[] = [];
-  let paragraph: string[] = [];
-  let paragraphOffset = 0;
-  let inFence = false;
-  let fenceLines: string[] = [];
-
-  const flushParagraph = () => {
-    if (paragraph.length > 0) {
-      const editControl = editableArticles
-        ? renderArticleEditControl("article-block-edit", paragraphOffset, "paragraph")
-        : "";
-      blocks.push(`<p${editableArticles ? ` class="article-editable-block"` : ""}>${editControl}${renderInlineArticleMarkdown(paragraph.join(" "), commandHref, renderInclude)}</p>`);
-      paragraph = [];
-    }
-  };
-
-  for (const sourceLine of lines) {
-    const line = sourceLine.text;
-    if (line.startsWith("```")) {
-      if (inFence) {
-        blocks.push(`<pre><code>${escapeHtml(fenceLines.join("\n"))}</code></pre>`);
-        fenceLines = [];
-        inFence = false;
-      } else {
-        flushParagraph();
-        inFence = true;
-      }
-      continue;
-    }
-
-    if (inFence) {
-      fenceLines.push(line);
-      continue;
-    }
-
-    if (!line.trim()) {
-      flushParagraph();
-      continue;
-    }
-
-    const include = /^\s*@include\{([^}\s]+)\}\s*$/.exec(line);
-    if (include && renderInclude) {
-      flushParagraph();
-      blocks.push(renderInclude(include[1]));
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line);
-    if (heading) {
-      flushParagraph();
-      const level = heading[1].length;
-      const headingText = heading[2].replace(/\s+\{#[^}]+\}\s*$/, "");
-      const id = slugForHeading(headingText);
-      const headingOffset = sourceLine.offset + heading[1].length + line.slice(heading[1].length).search(/\S/);
-      const editControl = editableArticles
-        ? renderArticleEditControl("article-heading-edit", headingOffset, level === 1 ? "title" : "heading")
-        : "";
-      blocks.push(`<h${level} id="${escapeHtml(id)}"${editableArticles ? ` class="article-editable-heading"` : ""}>${editControl}${renderInlineMarkdown(headingText, commandHref)}</h${level}>`);
-      continue;
-    }
-
-    if (paragraph.length === 0) {
-      paragraphOffset = sourceLine.offset + line.search(/\S/);
-    }
-    paragraph.push(line.trim());
-  }
-
-  flushParagraph();
-  if (inFence) {
-    blocks.push(`<pre><code>${escapeHtml(fenceLines.join("\n"))}</code></pre>`);
-  }
-
-  return blocks.join("\n");
-}
-
-function sourceLines(text: string): Array<{ text: string; offset: number }> {
-  const lines: Array<{ text: string; offset: number }> = [];
-  const linePattern = /([^\r\n]*)(?:\r\n|\r|\n|$)/g;
-  for (const match of text.matchAll(linePattern)) {
-    if (match[0].length === 0) {
-      break;
-    }
-    lines.push({ text: match[1], offset: match.index });
-  }
-  return lines;
-}
-
 function renderArticleEditControl(className: string, offset: number, blockType: string): string {
   const label = `Edit this ${blockType}`;
   return `<button class="${className}" type="button" data-edit-article data-edit-offset="${offset}" title="${label}" aria-label="${label}">Edit</button>`;
 }
 
-function renderInlineArticleMarkdown(
+function renderMarkdownDocument(
   text: string,
+  markdownTree: HandwaveMarkdownTree,
   commandHref: (target: string) => string,
+  editableArticles: boolean,
   renderInclude?: (target: string) => string
 ): string {
-  if (!renderInclude) {
-    return renderInlineMarkdown(text, commandHref);
-  }
-  const fragments: string[] = [];
-  let cursor = 0;
-  for (const match of text.matchAll(/@include\{([^}\s]+)\}/g)) {
-    fragments.push(renderInlineMarkdown(text.slice(cursor, match.index), commandHref));
-    fragments.push(renderInclude(match[1]));
-    cursor = match.index + match[0].length;
-  }
-  fragments.push(renderInlineMarkdown(text.slice(cursor), commandHref));
-  return fragments.join("");
+  return new MarkdownHtmlRenderer(
+    text,
+    commandHref,
+    true,
+    editableArticles,
+    renderInclude
+  ).renderDocument(markdownTree);
 }
 
-function renderInlineMarkdown(text: string, commandHref: (target: string) => string): string {
-  const links = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
-  const fragments: string[] = [];
-  let cursor = 0;
-  for (const match of text.matchAll(links)) {
-    fragments.push(renderTypographicText(text.slice(cursor, match.index)));
-    const label = renderTypographicText(match[1]);
-    const target = match[2];
+function renderInlineMarkdown(
+  text: string,
+  commandHref: (target: string) => string,
+  renderLinks = true
+): string {
+  const markdownTree = parseHandwaveMarkdown(text);
+  return new MarkdownHtmlRenderer(text, commandHref, renderLinks, false)
+    .renderInlineDocument(markdownTree);
+}
+
+class MarkdownHtmlRenderer {
+  private references: HandwaveMarkdownReferences = new Map();
+
+  constructor(
+    private readonly text: string,
+    private readonly commandHref: (target: string) => string,
+    private readonly renderLinks: boolean,
+    private readonly editableArticles: boolean,
+    private readonly renderInclude?: (target: string) => string
+  ) {}
+
+  renderDocument(tree: HandwaveMarkdownTree): string {
+    this.references = handwaveMarkdownReferences(this.text, tree);
+    return markdownChildren(tree.topNode)
+      .map((node) => this.renderBlock(node, false, this.editableArticles))
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  renderInlineDocument(tree: HandwaveMarkdownTree): string {
+    this.references = handwaveMarkdownReferences(this.text, tree);
+    return this.renderInlineContents(tree.topNode);
+  }
+
+  private renderBlock(node: HandwaveMarkdownNode, tightParagraph: boolean, editable: boolean): string {
+    const heading = handwaveMarkdownHeading(this.text, node);
+    if (heading) {
+      const id = heading.explicitId ?? slugForHeading(heading.title);
+      const editControl = editable
+        ? renderArticleEditControl(
+          "article-heading-edit",
+          heading.titleFrom,
+          heading.level === 1 ? "title" : "heading"
+        )
+        : "";
+      const cssClass = editable ? ` class="article-editable-heading"` : "";
+      return `<h${heading.level} id="${escapeHtml(id)}"${cssClass}>${editControl}${this.renderInlineContents(node, heading.titleFrom, heading.titleTo)}</h${heading.level}>`;
+    }
+
+    switch (node.name) {
+      case "Paragraph": {
+        const contents = this.renderInlineContents(node);
+        if (tightParagraph) {
+          return contents;
+        }
+        const editControl = editable
+          ? renderArticleEditControl("article-block-edit", this.firstContentOffset(node), "paragraph")
+          : "";
+        const cssClass = editable ? ` class="article-editable-block"` : "";
+        return `<p${cssClass}>${editControl}${contents}</p>`;
+      }
+      case "Blockquote": {
+        const editControl = editable
+          ? renderArticleEditControl("article-block-edit", this.firstContentOffset(node), "quote")
+          : "";
+        const cssClass = editable ? ` class="article-editable-block"` : "";
+        const contents = markdownChildren(node)
+          .filter((child) => child.name !== "QuoteMark")
+          .map((child) => this.renderBlock(child, false, false))
+          .filter(Boolean)
+          .join("\n");
+        return `<blockquote${cssClass}>${editControl}${contents}</blockquote>`;
+      }
+      case "BulletList":
+        return this.renderList(node, false, editable);
+      case "OrderedList":
+        return this.renderList(node, true, editable);
+      case "ListItem":
+        return this.renderListItem(node, tightParagraph);
+      case "FencedCode":
+      case "CodeBlock":
+        return this.renderCodeBlock(node);
+      case "HorizontalRule":
+        return "<hr>";
+      case "HandwaveIncludeBlock":
+        return this.renderHandwaveInclude(node);
+      case "LinkReference":
+        return "";
+      case "HTMLBlock":
+      case "CommentBlock":
+      case "ProcessingInstructionBlock":
+        return `<pre><code>${escapeHtml(this.text.slice(node.from, node.to))}</code></pre>`;
+      default: {
+        const children = markdownChildren(node);
+        if (children.length === 0) {
+          return renderTypographicText(this.text.slice(node.from, node.to));
+        }
+        return children
+          .map((child) => this.renderBlock(child, false, false))
+          .filter(Boolean)
+          .join("\n");
+      }
+    }
+  }
+
+  private renderList(node: HandwaveMarkdownNode, ordered: boolean, editable: boolean): string {
+    const tight = !this.isLooseList(node);
+    const items = markdownChildren(node)
+      .filter((child) => child.name === "ListItem")
+      .map((child) => this.renderListItem(child, tight))
+      .join("\n");
+    let startAttribute = "";
+    if (ordered) {
+      const firstMark = markdownChildren(markdownChildren(node)[0] ?? node)
+        .find((child) => child.name === "ListMark");
+      const start = firstMark
+        ? Number.parseInt(this.text.slice(firstMark.from, firstMark.to), 10)
+        : 1;
+      if (Number.isFinite(start) && start !== 1) {
+        startAttribute = ` start="${start}"`;
+      }
+    }
+    const tag = ordered ? "ol" : "ul";
+    const list = `<${tag}${startAttribute}>${items}</${tag}>`;
+    if (!editable) {
+      return list;
+    }
+    const editControl = renderArticleEditControl(
+      "article-block-edit",
+      this.firstContentOffset(node),
+      "list"
+    );
+    return `<div class="article-editable-block article-editable-list">${editControl}${list}</div>`;
+  }
+
+  private renderListItem(node: HandwaveMarkdownNode, tight: boolean): string {
+    const contents = markdownChildren(node)
+      .filter((child) => child.name !== "ListMark")
+      .map((child) => this.renderBlock(child, tight && child.name === "Paragraph", false))
+      .filter(Boolean)
+      .join("\n");
+    return `<li>${contents}</li>`;
+  }
+
+  private renderCodeBlock(node: HandwaveMarkdownNode): string {
+    const children = markdownChildren(node);
+    const code = children
+      .filter((child) => child.name === "CodeText")
+      .map((child) => this.text.slice(child.from, child.to))
+      .join("");
+    const info = children.find((child) => child.name === "CodeInfo");
+    const language = info
+      ? this.text.slice(info.from, info.to).trim().split(/\s+/, 1)[0]
+      : "";
+    const languageClass = language ? ` class="language-${escapeHtml(language)}"` : "";
+    return `<pre><code${languageClass}>${escapeHtml(code)}</code></pre>`;
+  }
+
+  private renderInlineContents(
+    node: HandwaveMarkdownNode,
+    from = node.from,
+    to = node.to
+  ): string {
+    const fragments: string[] = [];
+    let cursor = from;
+    for (const child of markdownChildren(node)) {
+      if (child.to <= from || child.from >= to) {
+        continue;
+      }
+      const childFrom = Math.max(child.from, from);
+      const childTo = Math.min(child.to, to);
+      if (cursor < childFrom) {
+        fragments.push(renderMarkdownText(this.text.slice(cursor, childFrom)));
+      }
+      fragments.push(this.renderInlineNode(child, childFrom, childTo));
+      cursor = child.name === "QuoteMark" && childTo < to && this.text[childTo] === " "
+        ? childTo + 1
+        : childTo;
+    }
+    if (cursor < to) {
+      fragments.push(renderMarkdownText(this.text.slice(cursor, to)));
+    }
+    return fragments.join("");
+  }
+
+  private renderInlineNode(
+    node: HandwaveMarkdownNode,
+    from = node.from,
+    to = node.to
+  ): string {
+    if (from !== node.from || to !== node.to) {
+      return renderMarkdownText(this.text.slice(from, to));
+    }
+    switch (node.name) {
+      case "Emphasis":
+        return this.renderDelimited(node, "em");
+      case "StrongEmphasis":
+        return this.renderDelimited(node, "strong");
+      case "Link":
+        return this.renderLink(node);
+      case "Image":
+        return this.renderImage(node);
+      case "Autolink":
+        return this.renderAutolink(node);
+      case "InlineCode":
+        return `<code>${escapeHtml(this.inlineCodeText(node))}</code>`;
+      case "Escape":
+        return renderTypographicText(this.text.slice(node.from + 1, node.to));
+      case "Entity":
+        return this.text.slice(node.from, node.to);
+      case "HardBreak":
+        return "<br>\n";
+      case "HandwaveMath":
+        return escapeHtml(this.text.slice(node.from, node.to));
+      case "HandwaveAnchor": {
+        const anchor = handwaveMarkdownAnchor(this.text, node);
+        return anchor ? `<span id="${escapeHtml(anchor.id)}"></span>` : "";
+      }
+      case "HandwaveIncludeInline":
+      case "HandwaveIncludeBlock":
+        return this.renderHandwaveInclude(node);
+      case "HTMLTag":
+        return escapeHtml(this.text.slice(node.from, node.to));
+      case "EmphasisMark":
+      case "CodeMark":
+      case "LinkMark":
+      case "URL":
+      case "LinkTitle":
+      case "LinkLabel":
+      case "HeaderMark":
+      case "ListMark":
+      case "QuoteMark":
+        return "";
+      default:
+        return this.renderInlineContents(node, from, to);
+    }
+  }
+
+  private renderDelimited(node: HandwaveMarkdownNode, tag: "em" | "strong"): string {
+    const marks = markdownChildren(node).filter((child) => child.name === "EmphasisMark");
+    const openingMark = marks[0];
+    const closingMark = marks[marks.length - 1];
+    if (!openingMark || !closingMark || openingMark === closingMark) {
+      return this.renderInlineContents(node);
+    }
+    return `<${tag}>${this.renderInlineContents(node, openingMark.to, closingMark.from)}</${tag}>`;
+  }
+
+  private renderLink(node: HandwaveMarkdownNode): string {
+    const link = handwaveMarkdownLink(this.text, node, this.references);
+    if (!link) {
+      return renderTypographicText(this.text.slice(node.from, node.to));
+    }
+    const label = this.renderInlineContents(node, link.labelFrom, link.labelTo);
+    if (!this.renderLinks) {
+      return label;
+    }
+    const target = link.target;
     const handwaveNavigation = isHandwaveNavigationTarget(target);
+    const href = handwaveNavigation ? this.commandHref(target) : safeMarkdownHref(target);
+    if (!href) {
+      return label;
+    }
     const navigationAttribute = handwaveNavigation
       ? ` data-handwave-target="${escapeHtml(target)}"`
       : "";
-    const href = handwaveNavigation ? commandHref(target) : target;
-    fragments.push(`<a href="${escapeHtml(href)}"${navigationAttribute} title="${escapeHtml(target)}">${label}</a>`);
-    cursor = match.index + match[0].length;
+    const title = this.linkTitle(node) ?? target;
+    return `<a href="${escapeHtml(href)}"${navigationAttribute} title="${escapeHtml(title)}">${label}</a>`;
   }
-  fragments.push(renderTypographicText(text.slice(cursor)));
-  return fragments.join("");
+
+  private renderAutolink(node: HandwaveMarkdownNode): string {
+    const urlNode = markdownChildren(node).find((child) => child.name === "URL");
+    if (!urlNode) {
+      return renderTypographicText(this.text.slice(node.from, node.to));
+    }
+    const label = this.text.slice(urlNode.from, urlNode.to);
+    if (!this.renderLinks) {
+      return renderTypographicText(label);
+    }
+    const target = label.includes("@") && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(label)
+      ? `mailto:${label}`
+      : label;
+    const href = safeMarkdownHref(target);
+    return href
+      ? `<a href="${escapeHtml(href)}" title="${escapeHtml(target)}">${renderTypographicText(label)}</a>`
+      : renderTypographicText(label);
+  }
+
+  private renderImage(node: HandwaveMarkdownNode): string {
+    const children = markdownChildren(node);
+    const closingLabel = children.find((child) =>
+      child.name === "LinkMark" && this.text.slice(child.from, child.to) === "]"
+    );
+    const urlNode = children.find((child) => child.name === "URL");
+    if (!closingLabel || !urlNode) {
+      return renderTypographicText(this.text.slice(node.from, node.to));
+    }
+    const labelFrom = node.from + 2;
+    const alt = this.plainInlineText(node, labelFrom, closingLabel.from);
+    const target = normalizeMarkdownUrl(this.text.slice(urlNode.from, urlNode.to));
+    const href = safeMarkdownHref(target);
+    if (!href) {
+      return escapeHtml(alt);
+    }
+    const title = this.linkTitle(node);
+    const titleAttribute = title === undefined ? "" : ` title="${escapeHtml(title)}"`;
+    return `<img src="${escapeHtml(href)}" alt="${escapeHtml(alt)}"${titleAttribute}>`;
+  }
+
+  private renderHandwaveInclude(node: HandwaveMarkdownNode): string {
+    const include = handwaveMarkdownInclude(this.text, node);
+    if (!include || !this.renderInclude) {
+      return escapeHtml(this.text.slice(node.from, node.to));
+    }
+    return this.renderInclude(include.target);
+  }
+
+  private inlineCodeText(node: HandwaveMarkdownNode): string {
+    const marks = markdownChildren(node).filter((child) => child.name === "CodeMark");
+    if (marks.length < 2) {
+      return this.text.slice(node.from, node.to);
+    }
+    let contents = this.text.slice(marks[0].to, marks[marks.length - 1].from)
+      .replace(/\r\n|\r|\n/g, " ");
+    if (
+      contents.length >= 2 &&
+      contents.startsWith(" ") &&
+      contents.endsWith(" ") &&
+      /[^ ]/.test(contents)
+    ) {
+      contents = contents.slice(1, -1);
+    }
+    return contents;
+  }
+
+  private linkTitle(node: HandwaveMarkdownNode): string | undefined {
+    const title = markdownChildren(node).find((child) => child.name === "LinkTitle");
+    if (!title) {
+      return undefined;
+    }
+    const source = this.text.slice(title.from, title.to);
+    return source.length >= 2 ? source.slice(1, -1) : source;
+  }
+
+  private plainInlineText(node: HandwaveMarkdownNode, from: number, to: number): string {
+    const fragments: string[] = [];
+    let cursor = from;
+    for (const child of markdownChildren(node)) {
+      if (child.to <= from || child.from >= to) {
+        continue;
+      }
+      const childFrom = Math.max(child.from, from);
+      const childTo = Math.min(child.to, to);
+      if (cursor < childFrom) {
+        fragments.push(this.text.slice(cursor, childFrom));
+      }
+      if (!/^(?:EmphasisMark|CodeMark|LinkMark)$/.test(child.name)) {
+        fragments.push(
+          child.name === "Escape"
+            ? this.text.slice(child.from + 1, child.to)
+            : markdownChildren(child).length > 0
+              ? this.plainInlineText(child, childFrom, childTo)
+              : this.text.slice(childFrom, childTo)
+        );
+      }
+      cursor = childTo;
+    }
+    if (cursor < to) {
+      fragments.push(this.text.slice(cursor, to));
+    }
+    return fragments.join("");
+  }
+
+  private firstContentOffset(node: HandwaveMarkdownNode): number {
+    if (node.name === "Paragraph") {
+      return node.from;
+    }
+    for (const child of markdownChildren(node)) {
+      if (/^(?:ListMark|QuoteMark|HeaderMark|CodeMark)$/.test(child.name)) {
+        continue;
+      }
+      return this.firstContentOffset(child);
+    }
+    const source = this.text.slice(node.from, node.to);
+    const firstNonSpace = source.search(/\S/);
+    return firstNonSpace < 0 ? node.from : node.from + firstNonSpace;
+  }
+
+  private isLooseList(node: HandwaveMarkdownNode): boolean {
+    const items = markdownChildren(node).filter((child) => child.name === "ListItem");
+    for (let index = 1; index < items.length; index++) {
+      if (hasMarkdownBlankLine(this.text.slice(items[index - 1].to, items[index].from))) {
+        return true;
+      }
+    }
+    return items.some((item) => {
+      const blocks = markdownChildren(item).filter((child) => child.name !== "ListMark");
+      for (let index = 1; index < blocks.length; index++) {
+        if (hasMarkdownBlankLine(this.text.slice(blocks[index - 1].to, blocks[index].from))) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+}
+
+function renderMarkdownText(text: string): string {
+  return renderTypographicText(text.replace(/(?:\r\n|\r|\n)[ \t]*/g, " "));
+}
+
+function hasMarkdownBlankLine(source: string): boolean {
+  return /(?:\r\n|\r|\n)[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n)/.test(source);
+}
+
+function normalizeMarkdownUrl(target: string): string {
+  return target.startsWith("<") && target.endsWith(">")
+    ? target.slice(1, -1)
+    : target;
+}
+
+function safeMarkdownHref(target: string): string | undefined {
+  const schemeProbe = target.replace(/[\u0000-\u0020\u007f]+/g, "").toLowerCase();
+  return /^(?:javascript|vbscript|data):/.test(schemeProbe) ? undefined : target;
 }
 
 function renderTypographicText(text: string): string {
@@ -1020,16 +1385,20 @@ function renderTypographicText(text: string): string {
 }
 
 export function applyLatexTextTypography(text: string): string {
-  const protectedInline = /(`+)([\s\S]*?)\1|\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\n])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?:https?:\/\/|mailto:|www\.)[^\s<]+/g;
   const fragments: string[] = [];
   let cursor = 0;
-  for (const match of text.matchAll(protectedInline)) {
-    fragments.push(replaceLatexTextDashes(text.slice(cursor, match.index)));
+  for (const match of protectedInlineMatches(text)) {
+    const matchIndex = match.index ?? 0;
+    fragments.push(replaceLatexTextDashes(text.slice(cursor, matchIndex)));
     fragments.push(match[0]);
-    cursor = match.index + match[0].length;
+    cursor = matchIndex + match[0].length;
   }
   fragments.push(replaceLatexTextDashes(text.slice(cursor)));
   return fragments.join("");
+}
+
+function protectedInlineMatches(text: string): IterableIterator<RegExpMatchArray> {
+  return text.matchAll(/(`+)([\s\S]*?)\1|\$\$[\s\S]*?\$\$|\$(?:\\.|[^$\n])+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|(?:https?:\/\/|mailto:|www\.)[^\s<]+/g);
 }
 
 function replaceLatexTextDashes(text: string): string {
@@ -1235,7 +1604,7 @@ function declarationLabel(baseLabel: string, declaration: LeanDeclaration): stri
     return `${escapeHtml(baseLabel)}.`;
   }
 
-  return `${escapeHtml(baseLabel)} (${renderTypographicText(displayName)}).`;
+  return `${escapeHtml(baseLabel)} (${renderInlineMarkdown(displayName, (target) => target, false)}).`;
 }
 
 function renderMilestoneTagControl(

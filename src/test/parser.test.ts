@@ -862,6 +862,57 @@ test("parses article headings, links, and includes", () => {
   assert.equal(article.includes[1].target, "lean:my_add_assoc.proof");
 });
 
+test("derives article navigation from the shared Markdown tree", () => {
+  const text = [
+    "# Real *title* {#chosen}",
+    "",
+    "```md",
+    "# Fake heading",
+    "[fake](lean:fake)",
+    "@include{lean:fake}",
+    "```",
+    "",
+    "- [real](lean:real)",
+    "  @include{lean:real}",
+    "",
+    "[proof link][proof]",
+    "",
+    "[proof]: lean:real.proof",
+    "",
+    "Paragraph anchor {#spot}."
+  ].join("\n");
+  const article = parseArticleDocument(text, "/workspace/shared-tree.hw.md");
+
+  assert.deepEqual(
+    article.anchors.map(({ id, title }) => ({ id, title })),
+    [
+      { id: "chosen", title: "Real *title*" },
+      { id: "spot", title: "spot" }
+    ]
+  );
+  assert.deepEqual(
+    article.links.map(({ label, target }) => ({ label, target })),
+    [
+      { label: "real", target: "lean:real" },
+      { label: "proof link", target: "lean:real.proof" }
+    ]
+  );
+  assert.deepEqual(article.includes.map(({ target }) => target), ["lean:real"]);
+  assert.deepEqual(article.links[1].targetRange, {
+    start: { line: 13, character: 9 },
+    end: { line: 13, character: 24 }
+  });
+  assert.deepEqual(article.includes[0].targetRange, {
+    start: { line: 9, character: 11 },
+    end: { line: 9, character: 20 }
+  });
+
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const html = renderArticleFragmentHtml(text, article.uri, index, (target) => `command:${target}`);
+  assert.match(html, /<h1 id="chosen">Real <em>title<\/em><\/h1>/);
+  assert.match(html, /Paragraph anchor <span id="spot"><\/span>\.<\/p>/);
+});
+
 test("parses targets and selectors", () => {
   assert.deepEqual(parseTarget("lean:my_add_assoc.statement"), {
     raw: "lean:my_add_assoc.statement",
@@ -1893,6 +1944,26 @@ test("enables MathJax for LaTeX formulas in rendered articles", () => {
   assert.ok(html.includes(JSON.stringify(handwaveMathJaxConfiguration.tex.macros.fint)));
 });
 
+test("does not interpret square brackets in formulas as Markdown links", () => {
+  const declarations = parseLeanDocument(leanText, "/workspace/Nat.lean");
+  const articleText = [
+    "Inline $F[x](y)$, display $$G[x](y)$$, TeX inline \\(H[x](y)\\), and TeX display \\[K[x](y)\\].",
+    "",
+    "A real [linked formula $F[x](y)$](lean:my_add_assoc) still works, while `code[x](y)` stays code."
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/brackets.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml(articleText, "/workspace/brackets.hw.md", index, (target) => `command:${target}`);
+
+  assert.match(html, /\$F\[x\]\(y\)\$/);
+  assert.match(html, /\$\$G\[x\]\(y\)\$\$/);
+  assert.match(html, /\\\(H\[x\]\(y\)\\\)/);
+  assert.match(html, /\\\[K\[x\]\(y\)\\\]/);
+  assert.doesNotMatch(html, /href="y"/);
+  assert.match(html, /href="command:lean:my_add_assoc"[^>]*>linked formula \$F\[x\]\(y\)\$<\/a>/);
+  assert.match(html, /<code>code\[x\]\(y\)<\/code>/);
+});
+
 test("renders LaTeX-style text dashes without changing code, math, or link targets", () => {
   const declarations = parseLeanDocument(`/--
 %%handwave
@@ -1924,12 +1995,141 @@ theorem dashRange : True := by
   assert.match(html, /Pages 1–5 — a range/);
   assert.match(html, /href="https:\/\/example\.com\/a--b"[^>]*>linked – label<\/a>/);
   assert.match(html, /\$x--y\$/);
-  assert.match(html, /`code--flag`/);
+  assert.match(html, /<code>code--flag<\/code>/);
   assert.match(html, /https:\/\/example\.com\/a--b unchanged/);
   assert.match(html, /Theorem \(Range – theorem\)\./);
   assert.match(html, /The range is 1–5\./);
   assert.match(html, /This follows — directly\./);
   assert.match(html, /<span class="lean-comment">-- keep--lean<\/span>/);
+});
+
+test("renders Markdown emphasis in articles and declaration prose", () => {
+  const declarations = parseLeanDocument(`/--
+%%handwave
+name:
+  An **important** definition
+statement:
+  This is *italic*, **bold**, and ***both***.
+-/
+def emphasizedDefinition : Nat := 0
+`, "/workspace/Emphasis.lean");
+  const articleText = [
+    "# *Emphasized* article",
+    "",
+    "Text with *asterisk italics*, _underscore italics_, **asterisk bold**, and __underscore bold__.",
+    "",
+    "A [**bold** and *italic* link](lean:emphasizedDefinition), plus **[a bold link](lean:emphasizedDefinition)**.",
+    "",
+    "Keep `$x_*not emphasis*$`, `**not bold**`, and https://example.com/a--b unchanged.",
+    "",
+    "@include{lean:emphasizedDefinition}"
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/emphasis.hw.md");
+  const index = new HandwaveIndex("/workspace", declarations, [article]);
+  const html = renderArticleHtml(articleText, article.uri, index, (target) => `command:${target}`);
+
+  assert.match(html, /<h1 id="emphasized-article"><em>Emphasized<\/em> article<\/h1>/);
+  assert.match(html, /Text with <em>asterisk italics<\/em>, <em>underscore italics<\/em>, <strong>asterisk bold<\/strong>, and <strong>underscore bold<\/strong>\./);
+  assert.match(html, /<a href="command:lean:emphasizedDefinition"[^>]*><strong>bold<\/strong> and <em>italic<\/em> link<\/a>/);
+  assert.match(html, /<strong><a href="command:lean:emphasizedDefinition"[^>]*>a bold link<\/a><\/strong>/);
+  assert.match(html, /Keep <code>\$x_\*not emphasis\*\$<\/code>, <code>\*\*not bold\*\*<\/code>, and https:\/\/example\.com\/a--b unchanged\./);
+  assert.match(html, /Definition \(An <strong>important<\/strong> definition\)\./);
+  assert.match(html, /This is <em>italic<\/em>, <strong>bold<\/strong>, and <em><strong>both<\/strong><\/em>\./);
+});
+
+test("renders quoted article lines as blockquotes", () => {
+  const articleText = [
+    "Before.",
+    "",
+    "> A **bold quotation**",
+    "> continued with *italics*.",
+    ">",
+    "> A second paragraph with a [term](term:quotation).",
+    "",
+    "After."
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/quotes.hw.md");
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const html = renderArticleFragmentHtml(articleText, article.uri, index, (target) => `command:${target}`, {
+    editableArticles: true
+  });
+
+  assert.match(html, /<blockquote class="article-editable-block"><button class="article-block-edit"[^>]*aria-label="Edit this quote">Edit<\/button><p>A <strong>bold quotation<\/strong> continued with <em>italics<\/em>\.<\/p>\s*<p>A second paragraph with a <a href="term:quotation"[^>]*>term<\/a>\.<\/p><\/blockquote>/);
+  assert.doesNotMatch(html, /> A \*\*bold quotation/);
+  assert.match(html, /<p class="article-editable-block"><button[^>]*>Edit<\/button>After\.<\/p>/);
+});
+
+test("renders CommonMark lists and nested blocks from the shared syntax tree", () => {
+  const articleText = [
+    "- **first** item",
+    "  - nested *item* with a [link](article:next)",
+    "  - math `$a_*b*$`",
+    "  @include{lean:listItem}",
+    "- second item",
+    "",
+    "3. third item",
+    "4. fourth item",
+    "",
+    "- loose first paragraph",
+    "",
+    "  second paragraph",
+    "",
+    "> Quoted list:",
+    ">",
+    "> - one",
+    "> - two"
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/lists.hw.md");
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const html = renderArticleFragmentHtml(
+    articleText,
+    article.uri,
+    index,
+    (target) => `command:${target}`,
+    { editableArticles: true }
+  );
+
+  assert.match(html, /<div class="article-editable-block article-editable-list"><button class="article-block-edit"[^>]*data-edit-offset="2"[^>]*aria-label="Edit this list">Edit<\/button><ul>/);
+  assert.match(html, /<li><strong>first<\/strong> item\s*<ul><li>nested <em>item<\/em> with a <a href="command:article:next"[^>]*>link<\/a><\/li>/);
+  assert.match(html, /<li>math <code>\$a_\*b\*\$<\/code><\/li><\/ul>/);
+  assert.match(html, /<div class="include unresolved">Unresolved include: <code>lean:listItem<\/code><\/div>/);
+  assert.match(html, /<ol start="3"><li>third item<\/li>\s*<li>fourth item<\/li><\/ol>/);
+  assert.match(html, /<ul><li><p>loose first paragraph<\/p>\s*<p>second paragraph<\/p><\/li><\/ul>/);
+  assert.match(html, /<blockquote class="article-editable-block">[\s\S]*?<p>Quoted list:<\/p>\s*<ul><li>one<\/li>\s*<li>two<\/li><\/ul><\/blockquote>/);
+});
+
+test("renders standard code, images, reference links, and unsafe HTML safely", () => {
+  const articleText = [
+    "Reference [documentation][docs], inline `x < y`, and ![an *image*](diagram.svg \"Diagram\").",
+    "",
+    "~~~ts",
+    "const marker = '**not bold**';",
+    "~~~",
+    "",
+    "<script>",
+    "alert('not executable')",
+    "</script>",
+    "",
+    "[unsafe](javascript:alert(1))",
+    "",
+    "[docs]: article:guide"
+  ].join("\n");
+  const article = parseArticleDocument(articleText, "/workspace/standard-markdown.hw.md");
+  const index = new HandwaveIndex("/workspace", [], [article]);
+  const html = renderArticleFragmentHtml(articleText, article.uri, index, (target) => `command:${target}`);
+
+  assert.deepEqual(article.links.map(({ target }) => target), [
+    "article:guide",
+    "javascript:alert(1)"
+  ]);
+  assert.match(html, /<a href="command:article:guide"[^>]*>documentation<\/a>/);
+  assert.match(html, /<code>x &lt; y<\/code>/);
+  assert.match(html, /<img src="diagram\.svg" alt="an image" title="Diagram">/);
+  assert.match(html, /<pre><code class="language-ts">const marker = '\*\*not bold\*\*';<\/code><\/pre>/);
+  assert.match(html, /<pre><code>&lt;script&gt;[\s\S]*?&lt;\/script&gt;<\/code><\/pre>/);
+  assert.doesNotMatch(html, /<script>\s*alert\('not executable'\)/);
+  assert.doesNotMatch(html, /href="javascript:/);
+  assert.match(html, /<p>unsafe<\/p>/);
 });
 
 test("renders unnamed theorem and definition labels plainly", () => {

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { promises as fs, watch, FSWatcher } from "node:fs";
+import { promises as fs, watch, watchFile, unwatchFile, FSWatcher } from "node:fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
 import * as path from "node:path";
 import { AddressInfo } from "node:net";
@@ -38,6 +38,7 @@ export async function startHandwaveServer(
   const pendingWatchers = new Map<string, NodeJS.Timeout>();
   let artifactRefreshTimer: NodeJS.Timeout | undefined;
   let refreshQueue = Promise.resolve();
+  const artifactCacheFile = path.join(workspace.root, ".lake", "handwave", "artifact-index-v1.json");
 
   const broadcastWorkspace = () => {
     for (const response of eventClients) {
@@ -53,6 +54,16 @@ export async function startHandwaveServer(
     }).catch(() => undefined);
   };
 
+  const scheduleArtifactRefresh = () => {
+    if (artifactRefreshTimer) {
+      clearTimeout(artifactRefreshTimer);
+    }
+    artifactRefreshTimer = setTimeout(() => {
+      artifactRefreshTimer = undefined;
+      enqueueRefresh(() => workspace.refreshArtifacts());
+    }, 260);
+  };
+
   const server = createServer((request, response) => {
     void handleRequest(request, response, workspace, token, eventClients, broadcastWorkspace);
   });
@@ -66,19 +77,17 @@ export async function startHandwaveServer(
   });
 
   if (options.watch !== false) {
+    // Recursive fs.watch can keep watching the old inode on Linux after an
+    // atomic cache replacement. Poll this one file to also catch later writes
+    // and creation when the cache directory does not exist at startup.
+    watchFile(artifactCacheFile, { interval: 500, persistent: false }, scheduleArtifactRefresh);
     watcher = watch(workspace.root, { recursive: true }, (_event, rawFile) => {
       if (!rawFile) {
         return;
       }
       const relative = rawFile.toString();
       if (isRelevantArtifact(relative)) {
-        if (artifactRefreshTimer) {
-          clearTimeout(artifactRefreshTimer);
-        }
-        artifactRefreshTimer = setTimeout(() => {
-          artifactRefreshTimer = undefined;
-          enqueueRefresh(() => workspace.refreshArtifacts());
-        }, 260);
+        scheduleArtifactRefresh();
         return;
       }
       if (!isRelevantSource(relative)) {
@@ -104,6 +113,9 @@ export async function startHandwaveServer(
     url,
     async close(): Promise<void> {
       watcher?.close();
+      if (options.watch !== false) {
+        unwatchFile(artifactCacheFile, scheduleArtifactRefresh);
+      }
       if (artifactRefreshTimer) {
         clearTimeout(artifactRefreshTimer);
         artifactRefreshTimer = undefined;
